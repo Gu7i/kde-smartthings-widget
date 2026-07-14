@@ -82,17 +82,21 @@ Item {
     readonly property string lockIcon:     Qt.resolvedUrl("../icons/lock.svg")
     readonly property string lockOpenIcon: Qt.resolvedUrl("../icons/lock-open.svg")
 
-    // SmartThings teal palette
-    readonly property color accentColor: "#3EC6C6"
-    readonly property color darkColor:   "#052625"
-    readonly property color mutedColor:  "#0C3C39"
+    // Palette: cream surface, teal ink/structure, coral for active/alert states.
+    readonly property color creamColor:  "#F2E8D1"
+    readonly property color tealColor:   "#3DA0AB"
+    readonly property color coralColor:  "#DD664E"
+    // Role aliases used across the card:
+    readonly property color accentColor: creamColor          // base surface / on-active ink
+    readonly property color darkColor:   tealColor           // ink, borders, headers
+    readonly property color mutedColor:  Qt.darker(tealColor, 1.3)  // dim teal, secondary text
 
     // ── Tile (square) ─────────────────────────────────────────────────────────
     Rectangle {
         anchors.fill: parent
         anchors.margins: 2
         radius: 0
-        color:        tileActive ? darkColor   : accentColor
+        color:        tileActive ? coralColor  : accentColor
         border.color: tileActive ? accentColor : darkColor
         border.width: 1
         opacity: deviceOnline ? 1 : 0.6
@@ -143,7 +147,7 @@ Item {
                 visible: isLock && !card.editingName
                 text: lockIsLocked ? "BLOQ" : (lockIsUnlocked ? "OPEN" : "---")
                 color: lockIsUnlocked ? accentColor
-                     : lockIsLocked  ? "#0c6b1d"
+                     : lockIsLocked  ? coralColor
                      :                 mutedColor
                 font.pixelSize: 8
                 font.bold: true
@@ -235,7 +239,7 @@ Item {
         anchors.fill: parent
         anchors.margins: 2
         radius: 0
-        color:        tileActive ? darkColor   : accentColor
+        color:        tileActive ? coralColor  : accentColor
         border.color: tileActive ? accentColor : darkColor
         border.width: 1
         opacity: deviceOnline ? 1 : 0.8
@@ -404,7 +408,7 @@ Item {
                 spacing: 12
                 Text {
                     text: motion ? "ACTIVE" : "IDLE"
-                    color: motion ? '#0c6b1d' : mutedColor
+                    color: motion ? coralColor : mutedColor
                     font.pixelSize: 10
                     font.bold: true
                     font.family: "monospace"
@@ -663,7 +667,7 @@ Item {
                 spacing: 8
                 Text {
                     text: (machineState !== "" ? machineState : "—").toUpperCase()
-                    color: machineState === "run" ? "#0c6b1d"
+                    color: machineState === "run" ? coralColor
                                                    : (tileActive ? accentColor : darkColor)
                     font.pixelSize: 10; font.bold: true; font.family: "monospace"
                 }

@@ -11,9 +11,13 @@ PlasmoidItem {
     readonly property string daemonUrl: "http://127.0.0.1:7182"
     readonly property int pollMs: 8000
 
-    // SmartThings teal palette
-    readonly property color accentColor: "#3EC6C6"
-    readonly property color darkColor:   "#052625"
+    // Palette: cream surface, teal ink/structure, coral for active/alert states.
+    readonly property color creamColor:  "#F2E8D1"
+    readonly property color tealColor:   "#3DA0AB"
+    readonly property color coralColor:  "#DD664E"
+    // Role aliases used across the UI:
+    readonly property color accentColor: creamColor   // base surface / background
+    readonly property color darkColor:   tealColor    // ink, borders, headers
 
     property int activeTab: 0
     readonly property var tabDefs: [
@@ -81,7 +85,7 @@ PlasmoidItem {
                             }
                             Rectangle {
                                 width: 5; height: 5; radius: 3
-                                color: daemonOk ? root.darkColor : "#CC2222"
+                                color: daemonOk ? root.darkColor : root.coralColor
                                 Layout.alignment: Qt.AlignVCenter
                             }
                         }
@@ -102,7 +106,7 @@ PlasmoidItem {
                         font.pixelSize: 9
                         font.bold: true
                         font.family: "monospace"
-                        color: "#CC2222"
+                        color: root.coralColor
                     }
 
                     Rectangle {
@@ -253,7 +257,7 @@ PlasmoidItem {
                 RowLayout {
                     Layout.fillWidth: true
                     Text {
-                        text: "#3EC6C6"
+                        text: "#3DA0AB"
                         font.pixelSize: 8
                         font.family: "monospace"
                         color: root.darkColor
