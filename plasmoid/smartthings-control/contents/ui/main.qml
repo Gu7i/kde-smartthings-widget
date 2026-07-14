@@ -11,13 +11,15 @@ PlasmoidItem {
     readonly property string daemonUrl: "http://127.0.0.1:7182"
     readonly property int pollMs: 8000
 
-    // Palette: cream surface, teal ink/structure, coral for active/alert states.
+    // Palette: dark surface, teal ink/structure, coral for active/alert states,
+    // cream for secondary text.
+    readonly property color darkBg:      "#1C1C1C"
     readonly property color creamColor:  "#F2E8D1"
     readonly property color tealColor:   "#3DA0AB"
     readonly property color coralColor:  "#DD664E"
     // Role aliases used across the UI:
-    readonly property color accentColor: creamColor   // base surface / background
-    readonly property color darkColor:   tealColor    // ink, borders, headers
+    readonly property color accentColor: darkBg      // base surface / background
+    readonly property color darkColor:   tealColor   // ink, borders, headers
 
     property int activeTab: 0
     readonly property var tabDefs: [

@@ -82,14 +82,16 @@ Item {
     readonly property string lockIcon:     Qt.resolvedUrl("../icons/lock.svg")
     readonly property string lockOpenIcon: Qt.resolvedUrl("../icons/lock-open.svg")
 
-    // Palette: cream surface, teal ink/structure, coral for active/alert states.
+    // Palette: dark surface, teal ink/structure, coral for active/alert states,
+    // cream for secondary text.
+    readonly property color darkBg:      "#2A2A2A"  // card surface, lifted off the popup bg
     readonly property color creamColor:  "#F2E8D1"
     readonly property color tealColor:   "#3DA0AB"
     readonly property color coralColor:  "#DD664E"
     // Role aliases used across the card:
-    readonly property color accentColor: creamColor          // base surface / on-active ink
-    readonly property color darkColor:   tealColor           // ink, borders, headers
-    readonly property color mutedColor:  Qt.darker(tealColor, 1.3)  // dim teal, secondary text
+    readonly property color accentColor: darkBg       // base surface / on-active ink
+    readonly property color darkColor:   tealColor    // ink, borders, headers
+    readonly property color mutedColor:  creamColor   // secondary text (on dark)
 
     // ── Tile (square) ─────────────────────────────────────────────────────────
     Rectangle {
