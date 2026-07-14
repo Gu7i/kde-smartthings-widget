@@ -7,7 +7,7 @@ and a QML plasmoid renders the controls.
 
 ![KDE Plasma 6](https://img.shields.io/badge/KDE_Plasma-6-blue)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11+-green)
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow)
+![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue)
 
 ## Features
 
@@ -223,4 +223,4 @@ python3 systray/systray.py
 
 ## License
 
-[MIT](LICENSE)
+[GNU General Public License v3.0](LICENSE)
