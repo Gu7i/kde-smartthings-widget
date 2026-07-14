@@ -1,0 +1,16 @@
+{
+    "KPlugin": {
+        "Id": "org.kde.smartthings-control",
+        "Name": "SmartThings Control",
+        "Name[es]": "Control SmartThings",
+        "Description": "Control smart home devices via Samsung SmartThings",
+        "Description[es]": "Controla dispositivos domóticos de Samsung SmartThings",
+        "Icon": "smartphone",
+        "Category": "Utilities",
+        "Version": "1.0.0",
+        "License": "GPL-2.0-or-later",
+        "Authors": [{"Name": "guti"}]
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-StandAloneApp": false
+}

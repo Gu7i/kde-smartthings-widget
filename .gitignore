@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local runtime config & secrets (live in ~/.config, never commit)
+config.json
+*.local
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
