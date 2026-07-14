@@ -5,7 +5,7 @@
         "Name[es]": "Control SmartThings",
         "Description": "Control smart home devices via Samsung SmartThings",
         "Description[es]": "Controla dispositivos domóticos de Samsung SmartThings",
-        "Icon": "smartphone",
+        "Icon": "smartthings",
         "Category": "Utilities",
         "Version": "1.0.0",
         "License": "GPL-3.0-or-later",

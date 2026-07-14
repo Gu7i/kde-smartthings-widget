@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg"
+     fill="none" stroke="currentColor" stroke-width="22"
+     stroke-linecap="round" stroke-linejoin="round">
+  <!-- spokes -->
+  <line x1="256" y1="216"   x2="256"   y2="140"/>
+  <line x1="217.9" y1="243.7" x2="145.4" y2="220.4"/>
+  <line x1="294.1" y1="243.7" x2="366.6" y2="220.4"/>
+  <line x1="232.5" y1="288.3" x2="188"   y2="349.6"/>
+  <line x1="279.5" y1="288.3" x2="324"   y2="349.6"/>
+  <!-- outer nodes -->
+  <circle cx="256" cy="106" r="24"/>
+  <circle cx="113" cy="210" r="24"/>
+  <circle cx="399" cy="210" r="24"/>
+  <circle cx="168" cy="377" r="24"/>
+  <circle cx="344" cy="377" r="24"/>
+  <!-- center hub -->
+  <circle cx="256" cy="256" r="30"/>
+</svg>

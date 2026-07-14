@@ -42,7 +42,9 @@ PlasmoidItem {
             anchors.centerIn: parent
             width: Math.min(parent.width, parent.height)
             height: width
-            source: daemonOk ? "smartphone" : "network-offline"
+            source: daemonOk ? Qt.resolvedUrl("../icons/smartthings.svg") : "network-offline"
+            isMask: daemonOk
+            color: Kirigami.Theme.textColor
             opacity: daemonOk ? 1 : 0.5
         }
         MouseArea {
