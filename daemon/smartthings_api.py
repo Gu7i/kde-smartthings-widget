@@ -15,8 +15,13 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 
 API_BASE      = "https://api.smartthings.com"
+# SmartThings has no bulk status endpoint, so a poll is 2 calls per device at
+# ~0.9 s each. Sequentially that is ~30 s for 30-odd devices — longer than the
+# poll interval itself. They are independent, so they run in a small pool.
+MAX_WORKERS   = 8
 # User authorization is served from account.smartthings.com (api.smartthings.com
 # returns an ELB 403 for /oauth/authorize). Token exchange stays on api.
 AUTHORIZE_URL = "https://account.smartthings.com/oauth/authorize"
@@ -186,6 +191,9 @@ class SmartThingsClient:
         # device_id → time until which polls keep the optimistic state instead of
         # overwriting it with a (possibly not-yet-updated) cloud read.
         self._hold: dict = {}
+        # room_id → room name, refreshed lazily (rooms rarely change)
+        self._rooms: dict = {}
+        self._rooms_fetched = 0.0
         # Called with (access_token, refresh_token) whenever tokens rotate,
         # so the daemon can persist them to config.
         self.on_token_refresh = None
@@ -240,10 +248,31 @@ class SmartThingsClient:
             pass
         return ""
 
+    def rooms(self) -> dict:
+        """room_id → name. Best-effort: an empty map just means no room grouping."""
+        if self._rooms and time.time() - self._rooms_fetched < 600:
+            return self._rooms
+        rooms = {}
+        try:
+            for loc in self._get("/v1/locations").get("items", []):
+                lid = loc.get("locationId")
+                if not lid:
+                    continue
+                for room in self._get(f"/v1/locations/{lid}/rooms").get("items", []):
+                    if room.get("roomId") and room.get("name"):
+                        rooms[room["roomId"]] = room["name"]
+        except Exception as exc:
+            print(f"[rooms] {exc}", flush=True)
+            return self._rooms
+        self._rooms = rooms
+        self._rooms_fetched = time.time()
+        return rooms
+
     # ── Devices ──────────────────────────────────────────────────────────────
 
     def fetch_devices(self) -> dict:
         result = self._get("/v1/devices")
+        rooms   = self.rooms()
         devices = {}
         for dev in result.get("items", []):
             did   = dev["deviceId"]
@@ -267,6 +296,7 @@ class SmartThingsClient:
             devices[did] = {
                 "id":                did,
                 "name":              label,
+                "room":              rooms.get(dev.get("roomId") or "", ""),
                 "type":              _device_type(dev.get("type", ""), all_caps,
                                                   switch_components, categories),
                 "online":            True,
@@ -276,16 +306,18 @@ class SmartThingsClient:
                 "state":             {},
             }
 
-        # Fetch per-device status + health (SmartThings has no bulk status endpoint).
+        # Fetch per-device status + health, in parallel (see MAX_WORKERS).
         old = self.devices           # locked snapshot of the previous cache
         now = time.time()
-        for did, dev in devices.items():
+
+        def refresh_one(item):
+            did, dev = item
             # Within the optimistic hold window after a command, keep the cached
             # state so a poll doesn't clobber it with a stale cloud read.
             if self._hold.get(did, 0) > now and did in old:
                 dev["state"]  = dict(old[did].get("state", {}))
                 dev["online"] = old[did].get("online", True)
-                continue
+                return
             try:
                 status = self._get(f"/v1/devices/{did}/status")
                 dev["state"] = _extract_state(dev, status)
@@ -296,6 +328,10 @@ class SmartThingsClient:
                 dev["online"] = health.get("state") == "ONLINE"
             except Exception:
                 pass
+
+        if devices:
+            with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(devices))) as pool:
+                list(pool.map(refresh_one, devices.items()))
 
         with self._lock:
             self._devices = devices

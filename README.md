@@ -11,13 +11,23 @@ and a QML plasmoid renders the controls.
 
 ## Features
 
-- Panel icon with a popup, organized into **tabs by device type**:
-  **Luces · Clima · Multimedia · Aparatos · Sensores · Botones · Hubs**
+- Panel icon with a **badge showing how many devices are on**, and a popup
+  organized into **tabs by device type**:
+  **Luces · Cerraduras · Clima · Multimedia · Aparatos · Sensores · Botones ·
+  Hubs** — each
+  tab shows its count, empty ones stay hidden, and the bar is a single scrollable
+  row rather than two wrapped ones.
+- **Search** by device, room or plug name, plus a **room filter**; the grid is
+  ordered by room, and each card shows the room it belongs to.
+- **Rename any device locally** (✏ on hover): the new name lives only in this
+  widget, never in the SmartThings cloud. See [Local device names](#local-device-names).
 - Devices are classified by SmartThings **component categories** (the same
   signal the official app uses), so a TV or AC — which also expose a `switch` —
   never gets misfiled as a light.
-- **Lights / switches / plugs**: square tiles, one tap to toggle; multi-outlet
-  plugs expand into individual tiles you can rename inline (✏).
+- **Lights / switches / plugs**: 4:3 tiles, one tap to toggle; multi-outlet
+  plugs expand into individual tiles. The shorter tile fits three rows of devices
+  where a square one fit two.
+- **Locks**: closing is one tap, **opening asks for confirmation** first.
 - **Dimmers**: brightness slider (`switchLevel`).
 - **Air conditioners**: on/off, target temperature (−/+ within the device's
   range), mode (auto/cool/dry/fan/heat), plus current temperature & humidity.
@@ -26,8 +36,31 @@ and a QML plasmoid renders the controls.
 - **Appliances** (washer/dryer…): on/off and machine state.
 - **Sensors**: read-only temperature, humidity, motion/contact, battery — with a
   desktop notification (`notify-send`) when a motion sensor becomes active.
+- **Surface instead of outline**: cards have no resting border — a grid of
+  outlined rectangles reads as a grille. The line comes back on hover and on
+  keyboard focus. Tiles join the tab chain, so you can Tab to a device and toggle
+  it with Space or Enter.
+- **Names in the desktop sans, everything else monospaced**: uppercase + mono +
+  8 px flattens a name into another field, so device names use the Plasma UI font
+  in sentence case and the terminal type is kept for labels, units and readouts.
+- **One colour per function**: teal is structure (borders, tabs, chrome), cream is
+  the device name, warm grey is secondary data, coral means *on*. A device that
+  is on gets a warm wash plus a coral bar rather than a flood of coral — and one
+  the hub can't reach is drawn with a diagonal hatch, so "off" and "unreachable"
+  never look alike. Every text pair clears WCAG AA (the old dark-on-coral name
+  was 4.16:1; the cream name is 11.8:1).
 - **Optimistic UI**: taps apply instantly; the daemon patches its cache first and
-  reconciles with the cloud a few seconds later, so controls never "bounce".
+  reconciles with the cloud a few seconds later, so controls never "bounce". A
+  command that fails says so in the popup instead of silently reverting.
+- **Adaptive polling**: the widget re-reads the daemon every 4 s while the popup
+  is open and every 30 s when closed; the daemon itself sweeps the cloud every
+  20 s. The refresh button (and middle-click on the panel icon) forces a real
+  sweep via `POST /refresh` and spins until it lands — roughly 5 s for 33
+  devices, because the per-device calls run in a thread pool instead of one after
+  another. The footer shows how old the *cloud* read is, not when the widget last
+  re-read the cache.
+- Sizes and type follow the **Plasma font settings**, so the widget stays legible
+  on HiDPI screens; the tile grid reflows to the widget's width.
 - Runs as a **systemd user service** (starts at boot). The access token is
   refreshed automatically and never expires in practice.
 - Optional PyQt6 **system tray** (`systray/systray.py`) as an alternative to the
@@ -134,7 +167,7 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 │  KDE Panel                          │
 │  ┌──────────────────────────────┐   │
 │  │  Plasmoid (QML)              │   │
-│  │  polls GET /devices every 8s │   │
+│  │  GET /devices: 4s open/30s   │   │
 │  │  POST /devices/{id}/<action> │   │
 │  └──────────────┬───────────────┘   │
 └─────────────────┼───────────────────┘
@@ -143,7 +176,7 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 │ smartthings-daemon (Python, stdlib) │
 │  ┌──────────────┴───────────────┐   │
 │  │  smartthings_service.py      │   │
-│  │  polls the cloud every 20 s, │   │
+│  │  sweeps the cloud every 20 s │   │
 │  │  caches state, optimistic     │   │
 │  │  patch + reconcile on command │   │
 │  └──────────────┬───────────────┘   │
@@ -159,7 +192,7 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 
 | Method | Path | Description |
 |---|---|---|
-| GET  | `/devices` | List all devices with state |
+| GET  | `/devices` | List all devices with state, room and local name |
 | GET  | `/devices/{id}` | One device |
 | GET  | `/status` | Daemon health + device count |
 | GET  | `/auth/status` | Auth state |
@@ -170,7 +203,10 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 | POST | `/devices/{id}/mode` | `{"value": "cool"}` (AC) |
 | POST | `/devices/{id}/setpoint` | `{"value": 22}` (AC) |
 | POST | `/devices/{id}/lock` · `/unlock` | Door lock |
-| POST | `/channel_name` | Rename a channel `{"device_id","outlet","name"}` |
+| POST | `/refresh` | Force a cloud sweep now; returns when it lands |
+| GET  | `/aliases` | Local names, keyed by device id / `{id}_{outlet}` |
+| POST | `/alias` | Local rename `{"key","name"}` — empty name restores the original |
+| POST | `/channel_name` | Legacy channel rename `{"device_id","outlet","name"}` |
 
 ## Configuration
 
@@ -187,7 +223,14 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 }
 ```
 
-Channel aliases live in `~/.config/smartthings-widget/channel_names.json`.
+### Local device names
+
+Every device (and every channel of a multi-switch) can be renamed from the
+widget: hover the card and click the pencil. The new name lives only in
+`~/.config/smartthings-widget/aliases.json` — nothing is renamed in the
+SmartThings cloud, so the app on your phone keeps the original name. Clearing
+the field (or the undo button) restores it. The older
+`channel_names.json` is imported automatically on first run.
 
 ## Useful commands
 

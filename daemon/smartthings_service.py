@@ -10,7 +10,10 @@ Endpoints:
   POST /devices/{id}/toggle
   POST /devices/{id}/brightness  (body: {"value": 75})
   POST /devices/{id}/lock | /unlock
-  POST /channel_name       → rename a multi-switch channel (local alias)
+  POST /refresh            → force a cloud sweep now (returns when it lands)
+  POST /alias              → rename any device/channel locally (body: {"key", "name"})
+  GET  /aliases
+  POST /channel_name       → rename a multi-switch channel (legacy shim over /alias)
   GET  /channel_names
   GET  /auth/status        → auth state
   POST /auth/start         → begin OAuth flow (returns authorization URL)
@@ -31,9 +34,14 @@ from pathlib import Path
 
 CONFIG_FILE        = Path.home() / ".config" / "smartthings-widget" / "config.json"
 CHANNEL_NAMES_FILE = Path.home() / ".config" / "smartthings-widget" / "channel_names.json"
+ALIASES_FILE       = Path.home() / ".config" / "smartthings-widget" / "aliases.json"
 PORT = 7182
 POLL_INTERVAL = 20  # seconds between cloud polls (no WebSocket available)
 
+
+# ── Local names ───────────────────────────────────────────────────────────────
+# Aliases are purely local: nothing is ever renamed in the SmartThings cloud.
+# Keyed by device id, or "{device_id}_{outlet}" for a multi-switch channel.
 
 def _load_channel_names() -> dict:
     try:
@@ -43,6 +51,65 @@ def _load_channel_names() -> dict:
     except Exception as e:
         print(f"[channel-names] {e}", file=sys.stderr)
     return {}
+
+
+def _load_aliases() -> dict:
+    try:
+        if ALIASES_FILE.exists():
+            with open(ALIASES_FILE) as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[aliases] {e}", file=sys.stderr)
+        return {}
+    return _migrate_channel_names()
+
+
+def _migrate_channel_names() -> dict:
+    """One-time import of the older per-channel name file into the alias map."""
+    aliases = {}
+    for did, names in _load_channel_names().items():
+        for i, name in enumerate(names or []):
+            if name:
+                aliases[f"{did}_{i}"] = name
+    if aliases:
+        _save_aliases(aliases)
+    return aliases
+
+
+def _save_aliases(data: dict) -> None:
+    ALIASES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ALIASES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _set_alias(key: str, name: str) -> None:
+    """Store a local name for `key`; an empty name restores the original."""
+    data = _load_aliases()
+    if name:
+        data[key] = name
+    else:
+        data.pop(key, None)
+    _save_aliases(data)
+
+
+def _with_aliases(dev: dict, aliases: dict) -> dict:
+    """Copy of `dev` with local names applied; the cloud name stays in orig_name."""
+    did      = dev["id"]
+    state    = dev.get("state") or {}
+    channels = state.get("channels")
+    alias    = aliases.get(did)
+    ch_keys  = [f"{did}_{i}" for i in range(len(channels))] if channels else []
+
+    if not alias and not any(k in aliases for k in ch_keys):
+        return dev
+
+    dev = dict(dev)
+    if alias:
+        dev["orig_name"] = dev["name"]
+        dev["name"]      = alias
+    if ch_keys:
+        dev["state"] = state = dict(state)
+        state["channel_names"] = [aliases.get(k, "") for k in ch_keys]
+    return dev
 
 
 def load_config() -> dict:
@@ -70,6 +137,7 @@ def save_tokens(access_token: str, refresh_token: str) -> None:
 
 _client = None
 _state_lock = threading.Lock()
+_refresh_gate = threading.Lock()   # serialises cloud sweeps (loop vs. /refresh)
 _last_error: str | None = None
 _last_refresh: float = 0
 _location_name: str = ""
@@ -109,14 +177,30 @@ def _check_motion(devices: dict) -> None:
             _motion_alerted.discard(did)
 
 
-def _refresh_loop():
+def _refresh_now() -> dict:
+    """Pull fresh state from the cloud and stamp _last_refresh.
+
+    One sweep at a time: if the background loop is already mid-poll, wait for it
+    and hand back its result rather than doubling the API traffic."""
     global _last_error, _last_refresh
+    if not _refresh_gate.acquire(blocking=False):
+        with _refresh_gate:
+            return _client.devices
+    try:
+        devices = _client.fetch_devices()
+        _check_motion(devices)
+        _last_error = None
+        _last_refresh = time.time()
+        return devices
+    finally:
+        _refresh_gate.release()
+
+
+def _refresh_loop():
+    global _last_error
     while True:
         try:
-            devices = _client.fetch_devices()
-            _check_motion(devices)
-            _last_error = None
-            _last_refresh = time.time()
+            _refresh_now()
         except Exception as e:
             _last_error = str(e)
             print(f"[refresh] {e}", file=sys.stderr)
@@ -137,12 +221,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, code: int, data):
+    def _send_json(self, code: int, data, extra_headers: dict | None = None):
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -214,24 +300,33 @@ class Handler(BaseHTTPRequestHandler):
             })
 
         elif path == "/devices":
-            names = _load_channel_names()
-            out = []
-            for dev in _client.devices.values():
-                if dev.get("type") == "multi_switch" and dev["id"] in names:
-                    dev = dict(dev)
-                    dev["state"] = dict(dev["state"])
-                    dev["state"]["channel_names"] = names[dev["id"]]
-                out.append(dev)
-            self._send_json(200, out)
+            aliases = _load_aliases()
+            # The body is the cache; the header says how old the cloud read is,
+            # so a client can show real freshness instead of "just re-read it".
+            self._send_json(200,
+                            [_with_aliases(d, aliases) for d in _client.devices.values()],
+                            {"X-Last-Refresh": f"{_last_refresh:.3f}"})
+
+        elif path == "/aliases":
+            self._send_json(200, _load_aliases())
 
         elif path == "/channel_names":
-            self._send_json(200, _load_channel_names())
+            # Legacy shape: {device_id: [name per outlet]}, derived from aliases.
+            out: dict[str, list] = {}
+            for key, name in _load_aliases().items():
+                did, _, idx = key.rpartition("_")
+                if not did or not idx.isdigit():
+                    continue
+                names = out.setdefault(did, [])
+                names.extend([""] * (int(idx) + 1 - len(names)))
+                names[int(idx)] = name
+            self._send_json(200, out)
 
         elif path.startswith("/devices/"):
             did = path[len("/devices/"):]
             dev = _client.devices.get(did)
             if dev:
-                self._send_json(200, dev)
+                self._send_json(200, _with_aliases(dev, _load_aliases()))
             else:
                 self._send_json(404, {"error": "device not found"})
         else:
@@ -255,29 +350,47 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"ok": False, "error": str(e)})
             return
 
-        # /channel_name  → rename a single channel (local alias)
-        if path == "/channel_name":
-            device_id = body.get("device_id", "")
-            outlet    = body.get("outlet", -1)
-            name      = body.get("name", "").strip()
-            if not device_id or outlet < 0 or not name:
-                self._send_json(400, {"ok": False, "error": "device_id, outlet and name required"})
+        # /refresh  → force a cloud sweep now, instead of waiting for the loop
+        if path == "/refresh":
+            try:
+                devices = _refresh_now()
+                self._send_json(200, {"ok": True, "count": len(devices),
+                                      "last_refresh": _last_refresh})
+            except Exception as e:
+                print(f"[refresh] {e}", file=sys.stderr)
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        # /alias  → local rename of any device or channel ("" restores the original)
+        if path == "/alias":
+            key  = str(body.get("key", "")).strip()
+            name = str(body.get("name", "")).strip()
+            if not key:
+                self._send_json(400, {"ok": False, "error": "key required"})
                 return
             try:
-                data  = _load_channel_names()
-                names = list(data.get(device_id, []))
-                while len(names) <= outlet:
-                    names.append("")
-                names[outlet] = name
-                data[device_id] = names
-                CHANNEL_NAMES_FILE.write_text(
-                    json.dumps(data, ensure_ascii=False, indent=2))
+                _set_alias(key, name)
                 self._send_json(200, {"ok": True})
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})
             return
 
-        # /channel_names  → save channel name mapping
+        # /channel_name  → legacy shim: rename a single channel
+        if path == "/channel_name":
+            device_id = body.get("device_id", "")
+            outlet    = body.get("outlet", -1)
+            name      = body.get("name", "").strip()
+            if not device_id or outlet < 0:
+                self._send_json(400, {"ok": False, "error": "device_id and outlet required"})
+                return
+            try:
+                _set_alias(f"{device_id}_{outlet}", name)
+                self._send_json(200, {"ok": True})
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        # /channel_names  → legacy shim: save a whole channel name list
         if path == "/channel_names":
             device_id  = body.get("device_id", "")
             names_list = body.get("names", [])
@@ -285,10 +398,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "device_id and names required"})
                 return
             try:
-                data = _load_channel_names()
-                data[device_id] = names_list
-                CHANNEL_NAMES_FILE.write_text(
-                    json.dumps(data, ensure_ascii=False, indent=2))
+                for i, name in enumerate(names_list):
+                    _set_alias(f"{device_id}_{i}", str(name or "").strip())
                 self._send_json(200, {"ok": True})
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})
