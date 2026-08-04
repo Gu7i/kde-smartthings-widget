@@ -7,6 +7,45 @@ PLASMOID_DIR="$SCRIPT_DIR/plasmoid/smartthings-control"
 SERVICE_DIR="$HOME/.config/systemd/user"
 PLASMOID_DEST="$HOME/.local/share/plasma/plasmoids/org.kde.smartthings-control"
 
+MODE="${1:-install}"
+
+case "$MODE" in
+    install|link) ;;
+    *)
+        echo "Usage: $0 [install|link]"
+        echo "  install  Full install: daemon, service and plasmoid (default)"
+        echo "  link     Only (re)link the plasmoid, for development"
+        exit 1
+        ;;
+esac
+
+# Shared by `link` and by the plasmoid step of a full install, so the two
+# report the same thing. -e is false for a dangling symlink, so test -L as
+# well or a broken link would survive and ln would fail on it.
+link_plasmoid() {
+    if [[ "$(readlink -f "$PLASMOID_DEST" 2>/dev/null)" == "$PLASMOID_DIR" ]]; then
+        echo "Already linked to this checkout."
+    else
+        if [[ -e "$PLASMOID_DEST" || -L "$PLASMOID_DEST" ]]; then
+            echo "Replacing $PLASMOID_DEST..."
+            rm -rf "$PLASMOID_DEST"
+        fi
+        mkdir -p "$(dirname "$PLASMOID_DEST")"
+        ln -s "$PLASMOID_DIR" "$PLASMOID_DEST"
+        echo "Linked $PLASMOID_DEST -> $PLASMOID_DIR"
+    fi
+    rm -rf "$HOME/.cache/plasmashell/qmlcache/" 2>/dev/null || true
+}
+
+# The daemon, the service and the panel step are all irrelevant when the only
+# thing you want is to point the plasmoid at a checkout again.
+if [[ "$MODE" == "link" ]]; then
+    link_plasmoid
+    systemctl --user restart plasma-plasmashell
+    exit 0
+fi
+
+
 echo "=== SmartThings KDE Widget Installer ==="
 echo ""
 
@@ -66,11 +105,7 @@ echo "  Service enabled and started."
 # ── 4. Plasma plasmoid ───────────────────────────────────────────────────────
 echo ""
 echo "[4/5] Installing Plasma plasmoid…"
-mkdir -p "$(dirname "$PLASMOID_DEST")"
-rm -rf "$PLASMOID_DEST"
-ln -s "$PLASMOID_DIR" "$PLASMOID_DEST"
-rm -rf "$HOME/.cache/plasmashell/qmlcache/" 2>/dev/null || true
-echo "  Plasmoid installed (symlink → $PLASMOID_DIR)."
+link_plasmoid
 
 # ── 5. Add widget to panel ───────────────────────────────────────────────────
 echo ""
