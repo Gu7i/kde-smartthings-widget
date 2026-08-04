@@ -425,12 +425,20 @@ Item {
         PC3.ToolButton {
             anchors.top:   parent.top
             anchors.right: parent.right
-            visible: tileHover.hovered && !card.editingName && !card.confirmingUnlock
+            // Present at all times, painted only on hover. Spawning it under the
+            // pointer let it take hover from tileHover, which hid it again, which
+            // gave hover back — the tile border blinked for as long as you rested
+            // in the corner.
+            visible: !card.editingName && !card.confirmingUnlock
+            opacity: tileHover.hovered ? 1 : 0
+            enabled: tileHover.hovered
             icon.name: "document-edit"
             onClicked: card.editingName = true
             QQC2.ToolTip.text: card.hasAlias ? "Renombrar (original: " + card.origName + ")"
                                              : "Renombrar solo en este widget"
             QQC2.ToolTip.visible: hovered
+
+            Behavior on opacity { NumberAnimation { duration: 100 } }
         }
 
     }
@@ -514,12 +522,20 @@ Item {
                 }
 
                 PC3.ToolButton {
-                    visible: rowHover.hovered && !card.editingName
+                    // Holds its slot in the layout whether or not it is showing.
+                    // Revealing it with `visible` grew the row's implicit height,
+                    // which grew card.height, which reflowed the grid under the
+                    // pointer — hover then oscillated and the border blinked.
+                    visible: !card.editingName
+                    opacity: rowHover.hovered ? 1 : 0
+                    enabled: rowHover.hovered
                     icon.name: "document-edit"
                     onClicked: card.editingName = true
                     QQC2.ToolTip.text: card.hasAlias ? "Renombrar (original: " + card.origName + ")"
                                                      : "Renombrar solo en este widget"
                     QQC2.ToolTip.visible: hovered
+
+                    Behavior on opacity { NumberAnimation { duration: 100 } }
                 }
 
                 PC3.ToolButton {

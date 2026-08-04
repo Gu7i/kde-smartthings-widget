@@ -11,6 +11,7 @@
         "License": "GPL-3.0-or-later",
         "Authors": [{"Name": "guti"}]
     },
+    "KPackageStructure": "Plasma/Applet",
     "X-Plasma-API-Minimum-Version": "6.0",
     "X-Plasma-StandAloneApp": false
 }

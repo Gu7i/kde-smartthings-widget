@@ -250,58 +250,65 @@ PlasmoidItem {
                 // ── Tab bar ───────────────────────────────────────────────────
                 // A single scrollable row instead of a wrapping Flow: seven tabs
                 // always wrapped to two rows, which cost ~24 px of device list.
-                ListView {
-                    id: tabBar
+                Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: Math.round(root.fontS * 2.2)
-                    orientation: ListView.Horizontal
-                    spacing: 3
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    model: root.visibleTabs
 
-                    delegate: Rectangle {
-                        required property int modelData      // index into tabDefs
+                    ListView {
+                        id: tabBar
+                        anchors.fill: parent
+                        orientation: ListView.Horizontal
+                        spacing: 3
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        model: root.visibleTabs
 
-                        readonly property bool active: root.activeTab === modelData
-                        readonly property int  count:  root.tabCounts[modelData] || 0
+                        delegate: Rectangle {
+                            required property int modelData      // index into tabDefs
 
-                        width: tabLabel.implicitWidth + Kirigami.Units.gridUnit
-                        height: tabBar.height
-                        color: active ? root.structColor : "transparent"
-                        border.color: active ? root.structColor : root.structDim
-                        border.width: 1
+                            readonly property bool active: root.activeTab === modelData
+                            readonly property int  count:  root.tabCounts[modelData] || 0
 
-                        Text {
-                            id: tabLabel
-                            anchors.centerIn: parent
-                            text: root.tabDefs[parent.modelData].label.toUpperCase()
-                                  + "  " + parent.count
-                            font.bold: true
-                            font.pixelSize: root.fontXS
-                            font.family: "monospace"
-                            font.letterSpacing: 1
-                            color: parent.active ? root.popupColor : root.secondColor
+                            width: tabLabel.implicitWidth + Kirigami.Units.gridUnit
+                            height: tabBar.height
+                            color: active ? root.structColor : "transparent"
+                            border.color: active ? root.structColor : root.structDim
+                            border.width: 1
+
+                            Text {
+                                id: tabLabel
+                                anchors.centerIn: parent
+                                text: root.tabDefs[parent.modelData].label.toUpperCase()
+                                      + "  " + parent.count
+                                font.bold: true
+                                font.pixelSize: root.fontXS
+                                font.family: "monospace"
+                                font.letterSpacing: 1
+                                color: parent.active ? root.popupColor : root.secondColor
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.activeTab = parent.modelData
+                            }
                         }
 
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.activeTab = parent.modelData
+                        // Keep the selected tab on screen when the row overflows.
+                        Connections {
+                            target: root
+                            function onActiveTabChanged() {
+                                const i = root.visibleTabs.indexOf(root.activeTab)
+                                if (i >= 0) tabBar.positionViewAtIndex(i, ListView.Contain)
+                            }
                         }
-                    }
 
-                    // Keep the selected tab on screen when the row overflows.
-                    Connections {
-                        target: root
-                        function onActiveTabChanged() {
-                            const i = root.visibleTabs.indexOf(root.activeTab)
-                            if (i >= 0) tabBar.positionViewAtIndex(i, ListView.Contain)
-                        }
                     }
 
                     // Fade at each end, so a clipped chip reads as "there is more"
-                    // rather than as a rendering glitch.
+                    // rather than as a rendering glitch. Siblings of the view, not
+                    // children: inline children of a ListView are reparented to its
+                    // contentItem, which would scroll them away with the chips.
                     Rectangle {
                         anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
                         width: Kirigami.Units.gridUnit
@@ -501,13 +508,26 @@ PlasmoidItem {
 
     // Tabs worth showing: those with results, plus the current one so the bar
     // never jumps out from under the selection.
-    readonly property var visibleTabs: {
-        modelRevision; searchText; roomFilter; activeTab   // dependencies
+    //
+    // Deliberately not a binding. This depends on activeTab, and a binding would
+    // hand the ListView a fresh array on every tab click — a new reference resets
+    // the view and destroys every delegate, including the one whose click is
+    // still being delivered, so the tab never actually switched. Assigning only
+    // when the contents change keeps the model stable across a plain selection.
+    property var visibleTabs: []
+
+    function rebuildVisibleTabs() {
         var out = []
         for (var t = 0; t < tabDefs.length; t++)
             if ((tabCounts[t] || 0) > 0 || activeTab === t) out.push(t)
-        return out
+        if (out.length === visibleTabs.length
+            && out.every((v, i) => v === visibleTabs[i])) return
+        visibleTabs = out
     }
+
+    onActiveTabChanged:    rebuildVisibleTabs()
+    onTabCountsChanged:    rebuildVisibleTabs()
+    Component.onCompleted: rebuildVisibleTabs()
 
     readonly property var tabCounts: {
         modelRevision; searchText; roomFilter   // dependencies
@@ -574,7 +594,10 @@ PlasmoidItem {
 
     onSearchTextChanged: ensureUsefulTab()
     onRoomFilterChanged: ensureUsefulTab()
-    onExpandedChanged: if (expanded) fetchDevices()
+    // root.expanded, not the bare name: expandedChanged carries a parameter, and
+    // an unqualified `expanded` binds to that injected argument — deprecated in
+    // Qt 6 and gone in Qt 7.
+    onExpandedChanged: if (root.expanded) fetchDevices()
 
     // ── Timers ────────────────────────────────────────────────────────────────
     Timer {
@@ -782,9 +805,13 @@ PlasmoidItem {
             const it = deviceModel.get(i)
             items.push({
                 key:  it.modelKey,
-                // Devices with no room sink to the bottom.
-                sort: (it.roomName || "￿").toLowerCase() + " "
-                    + (it.groupName || it.deviceName).toLowerCase() + " "
+                // Devices with no room sink to the bottom (U+FFFF sorts last).
+                // Fields are joined with NUL, which sorts before every printable
+                // character, so a short field never bleeds into the next one.
+                // Kept as an escape on purpose: a literal NUL byte in the source
+                // makes grep treat the file as binary and stops the QML parsers.
+                sort: (it.roomName || "￿").toLowerCase() + "\u0000"
+                    + (it.groupName || it.deviceName).toLowerCase() + "\u0000"
                     + it.deviceName.toLowerCase(),
             })
         }
