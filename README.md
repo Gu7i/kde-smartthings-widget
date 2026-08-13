@@ -21,12 +21,22 @@ and a QML plasmoid renders the controls.
   ordered by room, and each card shows the room it belongs to.
 - **Rename any device locally** (✏ on hover): the new name lives only in this
   widget, never in the SmartThings cloud. See [Local device names](#local-device-names).
+- **Device identity one click away** (ⓘ on hover): manufacturer, model,
+  firmware, integration and the raw `deviceId`, in a panel whose text you can
+  select — plus a **COPIAR** button. When something misbehaves, that is what you
+  paste into a search or a support thread. See [Device identity](#device-identity).
+- **Reorder the grid by hand** (⇅ in the header): cards rearrange live under the
+  pointer and the order is saved by the daemon, so it survives restarts and
+  plasmashell reloads. See [Manual order](#manual-order).
 - Devices are classified by SmartThings **component categories** (the same
   signal the official app uses), so a TV or AC — which also expose a `switch` —
   never gets misfiled as a light.
 - **Lights / switches / plugs**: 4:3 tiles, one tap to toggle; multi-outlet
   plugs expand into individual tiles. The shorter tile fits three rows of devices
   where a square one fit two.
+- **Buttons**: the same tiles (read-only) rather than full-width rows, so the
+  grid keeps one shape. A low battery takes over the tile's second line, which
+  is the one thing the row layout showed and a tile otherwise would not.
 - **Locks**: closing is one tap, **opening asks for confirmation** first.
 - **Dimmers**: brightness slider (`switchLevel`).
 - **Air conditioners**: on/off, target temperature (−/+ within the device's
@@ -36,6 +46,9 @@ and a QML plasmoid renders the controls.
 - **Appliances** (washer/dryer…): on/off and machine state.
 - **Sensors**: read-only temperature, humidity, motion/contact, battery — with a
   desktop notification (`notify-send`) when a motion sensor becomes active.
+- **The wheel always scrolls the list**: a brightness or volume slider under the
+  pointer hands the turn back to the list instead of swallowing it, so scrolling
+  past a volume bar never moves it by accident.
 - **Surface instead of outline**: cards have no resting border — a grid of
   outlined rectangles reads as a grille. The line comes back on hover and on
   keyboard focus. Tiles join the tab chain, so you can Tab to a device and toggle
@@ -207,6 +220,8 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 | GET  | `/aliases` | Local names, keyed by device id / `{id}_{outlet}` |
 | POST | `/alias` | Local rename `{"key","name"}` — empty name restores the original |
 | POST | `/channel_name` | Legacy channel rename `{"device_id","outlet","name"}` |
+| GET  | `/order` | Manual card order, as a list of keys (`[]` = default sort) |
+| POST | `/order` | Save it: `{"keys": [...]}` — an empty list restores the default |
 
 ## Configuration
 
@@ -231,6 +246,48 @@ widget: hover the card and click the pencil. The new name lives only in
 SmartThings cloud, so the app on your phone keeps the original name. Clearing
 the field (or the undo button) restores it. The older
 `channel_names.json` is imported automatically on first run.
+
+### Device identity
+
+The ⓘ button on any card opens a panel with everything you need to identify the
+physical device: **manufacturer, model, firmware, integration and `deviceId`**.
+The text is selectable, and **COPIAR** puts the whole block on the clipboard.
+
+Where those values come from depends on how the device reaches SmartThings, and
+the daemon reads all three shapes in this order:
+
+| Source | Devices | Fields |
+|---|---|---|
+| `ocf` | Samsung's own gear | maker, `modelNumber`, `firmwareVersion` |
+| `viper` | cloud-to-cloud integrations | maker, `modelName`, `swVersion` |
+| `deviceManufacturerCode` | Zigbee / Z-Wave | the real maker |
+
+`manufacturerName` is used only as a last resort: for Zigbee and Z-Wave devices
+it is usually whoever published the driver, not who built the device. Fields
+that no integration reports are left out of the panel rather than shown empty —
+firmware, for instance, is typically only there on Samsung devices, and LAN
+devices often report no model at all. The integration line is the device `type`
+SmartThings reports (`OCF`, `VIPER`, `LAN`, `ZIGBEE`, `HUB`…), which is the
+first thing worth knowing when a device stops answering: it tells you whether to
+look at your hub, your LAN or someone else's cloud.
+
+### Manual order
+
+⇅ in the header enters reorder mode: a banner appears, every card gets an
+outline, and dragging one moves it. Cards rearrange live under the pointer;
+**LISTO** leaves the mode and **RESTABLECER** goes back to the default ordering
+by room.
+
+It is a mode rather than a press-and-hold because these cards are covered in
+sliders, switches and playback buttons — any long-press gesture would fight
+them. While the mode is on, a veil covers each card whole, so a drag that starts
+on a volume bar moves the card instead of the volume.
+
+The order lives in `~/.config/smartthings-widget/order.json` (a list of the same
+keys as the aliases), not in the plasmoid config: keeping it next to the daemon
+means it survives plasmashell reloads and reinstalls, and any future client can
+read the same arrangement. Devices missing from the list — a newly paired one,
+say — sort after the ordered ones by room.
 
 ## Useful commands
 
