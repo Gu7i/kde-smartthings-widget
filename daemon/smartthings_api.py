@@ -304,6 +304,7 @@ class SmartThingsClient:
                 "switch_components": switch_components,
                 "categories":        sorted(categories),
                 "state":             {},
+                **_identity(dev),
             }
 
         # Fetch per-device status + health, in parallel (see MAX_WORKERS).
@@ -458,6 +459,35 @@ def _device_type(raw_type: str, caps: set[str], switch_components: list[str],
     if caps & SENSOR_CAPS:
         return "sensor"
     return "sensor"  # read-only fallback
+
+
+def _identity(dev: dict) -> dict:
+    """Make, model, firmware and integration, for the widget's device tooltip.
+
+    Which block carries them depends on how the device reaches SmartThings:
+    `ocf` for Samsung's own gear, `viper` for cloud-to-cloud integrations like
+    Sonos. Zigbee and Z-Wave report a manufacturer code and nothing else, so
+    the missing fields come back empty rather than as a placeholder — the UI
+    decides what to do with a gap."""
+    ocf   = dev.get("ocf")   or {}
+    viper = dev.get("viper") or {}
+
+    def pick(*values) -> str:
+        for v in values:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    return {
+        # deviceManufacturerCode outranks manufacturerName: on Zigbee and Z-Wave
+        # the latter names whoever published the driver ("SmartThingsCommunity"),
+        # while the code is the maker burned into the device.
+        "manufacturer": pick(ocf.get("manufacturerName"), viper.get("manufacturerName"),
+                             dev.get("deviceManufacturerCode"), dev.get("manufacturerName")),
+        "model":        pick(ocf.get("modelNumber"), viper.get("modelName")),
+        "firmware":     pick(ocf.get("firmwareVersion"), viper.get("swVersion")),
+        "integration":  pick(dev.get("type")),
+    }
 
 
 def _cap_value(status: dict, component: str, capability: str, attribute: str):

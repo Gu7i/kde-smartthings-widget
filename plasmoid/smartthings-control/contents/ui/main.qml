@@ -173,6 +173,37 @@ PlasmoidItem {
                     Rectangle {
                         implicitWidth:  Kirigami.Units.gridUnit * 1.35
                         implicitHeight: Kirigami.Units.gridUnit * 1.35
+                        // Filled while the mode is on: it is a state you can
+                        // leave the widget in, so it has to look switched on.
+                        color: (root.reordering || reorderArea.containsMouse)
+                               ? root.structColor : "transparent"
+                        border.color: root.structColor
+                        border.width: 1
+
+                        MouseArea {
+                            id: reorderArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.reordering = !root.reordering
+                            QQC2.ToolTip.text: root.reordering ? "Salir de reordenar"
+                                                               : "Reordenar dispositivos"
+                            QQC2.ToolTip.visible: containsMouse
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "⇅"
+                                font.pixelSize: root.fontM + 2
+                                font.bold: true
+                                color: (root.reordering || reorderArea.containsMouse)
+                                       ? root.popupColor : root.structColor
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        implicitWidth:  Kirigami.Units.gridUnit * 1.35
+                        implicitHeight: Kirigami.Units.gridUnit * 1.35
                         color: (refreshArea.containsMouse && !root.refreshing)
                                ? root.structColor : "transparent"
                         border.color: root.structColor
@@ -332,6 +363,46 @@ PlasmoidItem {
                     }
                 }
 
+                // ── Reorder banner ────────────────────────────────────────────
+                // The mode swallows every control on a card, so it has to say so
+                // plainly and offer the way out; nothing else explains why a tap
+                // on a light stopped turning it on.
+                Rectangle {
+                    Layout.fillWidth: true
+                    visible: root.reordering
+                    implicitHeight: Math.round(root.fontS * 2.6)
+                    color: "transparent"
+                    border.color: root.structColor
+                    border.width: 1
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin:  Kirigami.Units.smallSpacing
+                        anchors.rightMargin: Kirigami.Units.smallSpacing
+                        spacing: Kirigami.Units.smallSpacing
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "REORDENANDO · ARRASTRA LAS TARJETAS"
+                            elide: Text.ElideRight
+                            font.family: "monospace"
+                            font.bold: true
+                            font.pixelSize: root.fontXS
+                            color: root.structColor
+                        }
+
+                        PanelButton {
+                            label: "RESTABLECER"
+                            visible: root.customOrder.length > 0
+                            onClicked: root.resetOrder()
+                        }
+                        PanelButton {
+                            label: "LISTO"
+                            onClicked: root.reordering = false
+                        }
+                    }
+                }
+
                 // ── Device list ───────────────────────────────────────────────
                 QQC2.ScrollView {
                     id: scrollView
@@ -368,6 +439,7 @@ PlasmoidItem {
 
                                 DeviceCard {
                                     tile: deviceType === "switch" || deviceType === "lock"
+                                          || deviceType === "button"
                                     visible: root.matchesFilters(modelKey, deviceType,
                                                                  deviceName, groupName, roomName,
                                                                  root.activeTab)
@@ -385,6 +457,19 @@ PlasmoidItem {
                                     onAcModeSet:          (id, mode) => setAcMode(id, mode)
                                     onSetpointSet:        (id, val) => setSetpoint(id, val)
                                     onScrollRequested:    (delta) => scrollView.scrollBy(delta)
+                                    onCopyRequested:      (text) => copyToClipboard(text, "COPIADO AL PORTAPAPELES")
+                                    onInfoRequested:      (title, body) => infoPanel.show(title, body)
+                                    reordering: root.reordering
+                                    onReorderDragged:     (key, sx, sy) => {
+                                        // Scene coordinates, so the card under
+                                        // the pointer is found even once the
+                                        // pointer has left the dragged card.
+                                        const p = deviceFlow.mapFromItem(null, sx, sy)
+                                        const under = deviceFlow.childAt(p.x, p.y)
+                                        reorderTo(key, under && under.modelKey !== undefined
+                                                       ? under.modelKey : "")
+                                    }
+                                    onReorderDropped:     () => saveOrder()
                                 }
                             }
                         }
@@ -477,16 +562,135 @@ PlasmoidItem {
                     opacity: 0.3
                 }
 
-                // The counts moved to the header, so the footer is just freshness.
+                // The counts moved to the header, so the footer is just freshness
+                // — and the one place a copy can report itself without a dialog.
                 Text {
                     Layout.fillWidth: true
-                    text: root.lastUpdateText
+                    text: root.flashMsg !== "" ? root.flashMsg : root.lastUpdateText
                     font.pixelSize: root.fontXS
                     font.family: "monospace"
                     color: root.secondColor
                     opacity: 0.7
                 }
             }
+        }
+
+        QQC2.Popup {
+            id: infoPanel
+
+            property string deviceTitle: ""
+            property string body: ""
+
+            function show(title, text) {
+                deviceTitle = title
+                body        = text
+                open()
+            }
+
+            // Declared inside the full representation on purpose: that is the
+            // item that gets reparented into the popup window, so this is the
+            // window the panel opens in. Hung off the applet root instead, it
+            // belonged to the panel's window and never showed. Its parent is
+            // therefore the popup itself, which is also what it centres on —
+            // no Overlay lookup, which is null this early in a plasmoid.
+            anchors.centerIn: parent
+            width: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 400,
+                            Kirigami.Units.gridUnit * 26)
+            modal: true
+            focus: true
+            padding: Kirigami.Units.smallSpacing * 2
+            closePolicy: QQC2.Popup.CloseOnEscape | QQC2.Popup.CloseOnPressOutside
+
+            background: Rectangle {
+                color: root.popupColor
+                border.color: root.structColor
+                border.width: 1
+            }
+
+            contentItem: ColumnLayout {
+                spacing: Kirigami.Units.smallSpacing
+
+                Text {
+                    Layout.fillWidth: true
+                    text: infoPanel.deviceTitle
+                    elide: Text.ElideRight
+                    font.bold: true
+                    font.pixelSize: root.fontS
+                    color: root.creamColor
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 1
+                    color: root.structColor
+                    opacity: 0.4
+                }
+
+                // Read-only but selectable, so a single value can be dragged out
+                // without taking the whole block.
+                TextEdit {
+                    Layout.fillWidth: true
+                    readOnly: true
+                    selectByMouse: true
+                    text: infoPanel.body
+                    font.family: "monospace"
+                    font.pixelSize: root.fontXS
+                    color: root.creamColor
+                    selectionColor: root.structColor
+                    selectedTextColor: root.popupColor
+                    wrapMode: Text.NoWrap
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Kirigami.Units.smallSpacing
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Item { Layout.fillWidth: true }
+
+                    PanelButton {
+                        label: "COPIAR"
+                        onClicked: root.copyToClipboard(
+                            infoPanel.deviceTitle + "\n" + infoPanel.body,
+                            "COPIADO AL PORTAPAPELES")
+                    }
+                    PanelButton {
+                        label: "CERRAR"
+                        onClicked: infoPanel.close()
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Device fact sheet ─────────────────────────────────────────────────────
+    // A tooltip is gone by the time you reach for it, so anything meant to be
+    // read twice or picked apart lives here: it stays until dismissed and the
+    // text can be selected. It is a popup inside the widget rather than a real
+    // window on purpose — a window would take focus, and a plasmoid hides itself
+    // the moment it loses focus, taking the panel down with it.
+    component PanelButton: Rectangle {
+        property alias label: buttonLabel.text
+        signal clicked
+
+        implicitWidth:  buttonLabel.implicitWidth + Kirigami.Units.gridUnit
+        implicitHeight: Math.round(root.fontS * 2.4)
+        color: "transparent"
+        border.color: root.structColor
+        border.width: 1
+
+        Text {
+            id: buttonLabel
+            anchors.centerIn: parent
+            font.family: "monospace"
+            font.bold: true
+            font.pixelSize: root.fontXS
+            color: root.structColor
+        }
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: parent.clicked()
         }
     }
 
@@ -500,6 +704,12 @@ PlasmoidItem {
     // When the *daemon* last read the cloud — not when we last read its cache.
     property double lastUpdate: 0
     property int nowTick: 0                  // drives the relative "hace Ns" label
+    property string flashMsg: ""             // transient footer note, e.g. a copy
+    // Manual card order: the keys the user dragged, in order. Empty means the
+    // default room-then-name sort is in charge.
+    property var customOrder: []
+    property bool reordering: false
+    property bool orderDirty: false          // a drag moved something since the drop
     // Bumped on every model rebuild: ListModel changes don't invalidate bindings
     // on their own, so anything derived from the model depends on this instead.
     property int modelRevision: 0
@@ -538,7 +748,10 @@ PlasmoidItem {
 
     onActiveTabChanged:    rebuildVisibleTabs()
     onTabCountsChanged:    rebuildVisibleTabs()
-    Component.onCompleted: rebuildVisibleTabs()
+    Component.onCompleted: {
+        rebuildVisibleTabs()
+        fetchOrder()
+    }
 
     readonly property var tabCounts: {
         modelRevision; searchText; roomFilter   // dependencies
@@ -638,6 +851,29 @@ PlasmoidItem {
         errorTimer.restart()
     }
 
+    Timer {
+        id: flashTimer
+        interval: 3000
+        onTriggered: root.flashMsg = ""
+    }
+
+    // Qt exposes no clipboard to QML, and the types that do (Clipboard from
+    // kquickcontrolsaddons) would add a framework this widget does not otherwise
+    // need. A TextEdit's own copy() reaches the same clipboard; it never draws.
+    TextEdit {
+        id: clipboardRelay
+        visible: false
+    }
+
+    function copyToClipboard(text, note) {
+        clipboardRelay.text = text
+        clipboardRelay.selectAll()
+        clipboardRelay.copy()
+        clipboardRelay.text = ""
+        flashMsg = note
+        flashTimer.restart()
+    }
+
     // ── API helpers ───────────────────────────────────────────────────────────
 
     // Ask the daemon to go out to SmartThings right now. Plain fetchDevices()
@@ -719,6 +955,12 @@ PlasmoidItem {
                         deviceType:   "switch",
                         deviceOnline: d.online,
                         roomName:     d.room || "",
+                        // Every channel is the same physical strip, so they all
+                        // carry its identity.
+                        manufacturer: d.manufacturer || "",
+                        model:        d.model        || "",
+                        firmware:     d.firmware     || "",
+                        integration:  d.integration  || "",
                         switchOn:     on,
                         outlet:       i,
                         groupName:    d.name,
@@ -776,6 +1018,11 @@ PlasmoidItem {
             deviceType:   d.type,
             deviceOnline: d.online,
             roomName:     d.room ?? "",
+            // Hardware identity, for the tooltip that names a failing device.
+            manufacturer: d.manufacturer ?? "",
+            model:        d.model        ?? "",
+            firmware:     d.firmware     ?? "",
+            integration:  d.integration  ?? "",
             switchOn:     s.on ?? false,
             outlet:       -1,
             groupName:    "",
@@ -809,13 +1056,25 @@ PlasmoidItem {
     }
 
     // Order by room, then by device (channels of one strip stay together), so
-    // the grid reads as rooms even though it is a single flow.
+    // the grid reads as rooms even though it is a single flow. A device the user
+    // dragged outranks all of that and holds the place it was dropped in; the
+    // ones never touched keep the default order behind them.
     function sortModel() {
+        // Nothing reorders behind the user's back while they are arranging cards
+        // by hand. A poll lands every four seconds with the popup open, and each
+        // one used to re-sort from the *saved* order — which undid the drag in
+        // progress and shuffled the grid out from under the pointer. The order on
+        // screen is the intended one until the drop writes it down.
+        if (root.reordering) return
+
         const items = []
+        const manual = root.customOrder
         for (let i = 0; i < deviceModel.count; i++) {
             const it = deviceModel.get(i)
+            const pos = manual.indexOf(it.modelKey)
             items.push({
                 key:  it.modelKey,
+                rank: pos >= 0 ? pos : Number.MAX_SAFE_INTEGER,
                 // Devices with no room sink to the bottom (U+FFFF sorts last).
                 // Fields are joined with NUL, which sorts before every printable
                 // character, so a short field never bleeds into the next one.
@@ -826,12 +1085,96 @@ PlasmoidItem {
                     + it.deviceName.toLowerCase(),
             })
         }
-        items.sort((a, b) => a.sort < b.sort ? -1 : (a.sort > b.sort ? 1 : 0))
+        items.sort((a, b) => a.rank !== b.rank ? a.rank - b.rank
+                           : (a.sort < b.sort ? -1 : (a.sort > b.sort ? 1 : 0)))
         for (let target = 0; target < items.length; target++) {
             const cur = findIndex(items[target].key)
             if (cur >= 0 && cur !== target)
                 deviceModel.move(cur, target, 1)
         }
+    }
+
+    // ── Manual order ──────────────────────────────────────────────────────────
+
+    function fetchOrder() {
+        const xhr = new XMLHttpRequest()
+        xhr.open("GET", daemonUrl + "/order")
+        xhr.timeout = 5000
+        xhr.onreadystatechange = () => {
+            if (xhr.readyState !== XMLHttpRequest.DONE || xhr.status !== 200) return
+            try {
+                const keys = JSON.parse(xhr.responseText)
+                if (Array.isArray(keys)) {
+                    customOrder = keys
+                    sortModel()
+                    modelRevision++
+                }
+            } catch (e) {
+                // A corrupt order file is not worth an error banner: the default
+                // sort still works, and the next drag rewrites the file anyway.
+            }
+        }
+        xhr.send()
+    }
+
+    // Called once, on release. Saving on every swap during a drag would mean a
+    // request per card crossed, and a half-finished drag is not an intent yet.
+    function saveOrder() {
+        if (!orderDirty) return
+        orderDirty = false
+
+        const keys = []
+        for (let i = 0; i < deviceModel.count; i++)
+            keys.push(deviceModel.get(i).modelKey)
+        customOrder = keys
+
+        const xhr = new XMLHttpRequest()
+        xhr.open("POST", daemonUrl + "/order")
+        xhr.setRequestHeader("Content-Type", "application/json")
+        xhr.timeout = 5000
+        xhr.onreadystatechange = () => {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            if (xhr.status !== 200) showError("No se pudo guardar el orden")
+        }
+        xhr.onerror   = () => showError("No se pudo guardar el orden: daemon sin respuesta")
+        xhr.ontimeout = () => showError("No se pudo guardar el orden: sin respuesta")
+        xhr.send(JSON.stringify({ keys: keys }))
+    }
+
+    function resetOrder() {
+        customOrder = []
+        orderDirty  = false
+        sortModel()
+        modelRevision++
+
+        const xhr = new XMLHttpRequest()
+        xhr.open("POST", daemonUrl + "/order")
+        xhr.setRequestHeader("Content-Type", "application/json")
+        xhr.timeout = 5000
+        xhr.onreadystatechange = () => {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            if (xhr.status !== 200) showError("No se pudo restablecer el orden")
+        }
+        xhr.send(JSON.stringify({ keys: [] }))
+    }
+
+    // A drag reports which card the pointer is over; that card decides the target
+    // slot. Moving the row on the way (rather than on release) is what makes the
+    // grid rearrange live under the pointer, and it costs nothing — the write to
+    // the daemon happens once, on release.
+    //
+    // The hit test itself lives in the delegate, not here: `fullRepresentation`
+    // is an implicit Component, so ids declared inside it (deviceFlow among them)
+    // are out of scope for functions at this level.
+    function reorderTo(key, targetKey) {
+        if (targetKey === "" || targetKey === key) return
+
+        const from = findIndex(key)
+        const to   = findIndex(targetKey)
+        if (from < 0 || to < 0 || from === to) return
+
+        deviceModel.move(from, to, 1)
+        orderDirty = true
     }
 
     function findIndex(key) {

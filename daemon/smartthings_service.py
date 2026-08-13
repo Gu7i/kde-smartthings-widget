@@ -35,6 +35,7 @@ from pathlib import Path
 CONFIG_FILE        = Path.home() / ".config" / "smartthings-widget" / "config.json"
 CHANNEL_NAMES_FILE = Path.home() / ".config" / "smartthings-widget" / "channel_names.json"
 ALIASES_FILE       = Path.home() / ".config" / "smartthings-widget" / "aliases.json"
+ORDER_FILE         = Path.home() / ".config" / "smartthings-widget" / "order.json"
 PORT = 7182
 POLL_INTERVAL = 20  # seconds between cloud polls (no WebSocket available)
 
@@ -79,6 +80,29 @@ def _migrate_channel_names() -> dict:
 def _save_aliases(data: dict) -> None:
     ALIASES_FILE.parent.mkdir(parents=True, exist_ok=True)
     ALIASES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+# ── Manual order ──────────────────────────────────────────────────────────────
+# A list of device keys, in the order the user dragged them into. Also purely
+# local, and stored as a list rather than a map of positions so that reading it
+# back cannot produce ties or holes. Keys that have since disappeared are kept:
+# unplugging a device for a week should not cost it its place.
+
+def _load_order() -> list:
+    try:
+        if ORDER_FILE.exists():
+            with open(ORDER_FILE) as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return [str(k) for k in data]
+    except Exception as e:
+        print(f"[order] {e}", file=sys.stderr)
+    return []
+
+
+def _save_order(keys: list) -> None:
+    ORDER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ORDER_FILE.write_text(json.dumps(keys, ensure_ascii=False, indent=2))
 
 
 def _set_alias(key: str, name: str) -> None:
@@ -310,6 +334,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/aliases":
             self._send_json(200, _load_aliases())
 
+        elif path == "/order":
+            self._send_json(200, _load_order())
+
         elif path == "/channel_names":
             # Legacy shape: {device_id: [name per outlet]}, derived from aliases.
             out: dict[str, list] = {}
@@ -370,6 +397,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 _set_alias(key, name)
+                self._send_json(200, {"ok": True})
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        # /order  → the manual card order; an empty list restores the default one
+        if path == "/order":
+            keys = body.get("keys")
+            if not isinstance(keys, list):
+                self._send_json(400, {"ok": False, "error": "keys required"})
+                return
+            try:
+                _save_order([str(k) for k in keys])
                 self._send_json(200, {"ok": True})
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})

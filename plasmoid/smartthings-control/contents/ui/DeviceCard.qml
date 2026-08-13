@@ -15,6 +15,12 @@ Item {
     required property string deviceType
     required property bool   deviceOnline
     required property string roomName
+    // Hardware identity. Empty for integrations that don't report it (Zigbee and
+    // Z-Wave give a maker at best), so every reader has to skip the gaps.
+    required property string manufacturer
+    required property string model
+    required property string firmware
+    required property string integration
     required property bool   switchOn
     required property real   brightness
     required property int    outlet
@@ -46,6 +52,7 @@ Item {
     required property string jobState
 
     property bool tile: false
+    property bool reordering: false
     property bool editingName: false
     property bool confirmingUnlock: false   // opening a lock asks first
 
@@ -60,6 +67,12 @@ Item {
     signal setpointSet(string id, int value)
     // A wheel turn over a slider scrolls the list instead of moving the slider.
     signal scrollRequested(real delta)
+    signal copyRequested(string text)
+    signal infoRequested(string title, string body)
+    // Scene coordinates: the card is being dragged past its own siblings, so the
+    // only frame both ends agree on is the window's.
+    signal reorderDragged(string key, real sceneX, real sceneY)
+    signal reorderDropped()
 
     // 4:3 rather than square: an icon, a name and a room fit in three quarters of
     // the height, which buys a whole extra row of devices in the same popup.
@@ -177,6 +190,35 @@ Item {
     readonly property int fontXS: Math.max(7, Math.round(fontM * 0.72))
     readonly property int fontS:  Math.max(8, Math.round(fontM * 0.85))
 
+    // ── Identity ──────────────────────────────────────────────────────────────
+    // What the device *is*, as opposed to what it is doing: the tooltip answers
+    // "which one of these is failing, and what firmware is it on" without a trip
+    // to the SmartThings app. Fields an integration doesn't report are dropped
+    // rather than shown empty — a column of dashes reads as broken.
+    readonly property var infoFields: {
+        const rows = []
+        if (manufacturer !== "") rows.push(["MARCA",  manufacturer])
+        if (model        !== "") rows.push(["MODELO", model])
+        if (firmware     !== "") rows.push(["FW",     firmware])
+        if (integration  !== "") rows.push(["ENLACE", integration])
+        rows.push(["ID", deviceId])
+        return rows
+    }
+
+    // Aligned on a fixed label column: monospace makes that exact, and the block
+    // is the same shape here and in the clipboard.
+    readonly property string infoBlock:
+        infoFields.map(r => r[0].padEnd(7) + r[1]).join("\n")
+
+    // The panel shows the title and the body separately and the clipboard gets
+    // them joined, so what you read is exactly what you paste. The reader is a
+    // person looking at a report, hence the room and the plain "no network".
+    readonly property string infoTitle:
+        deviceName + (roomName !== "" ? "  (" + roomName + ")" : "")
+    readonly property string infoBody:
+        infoBlock + (deviceOnline ? "" : "\nESTADO SIN RED")
+    readonly property string infoClip: infoTitle + "\n" + infoBody
+
     // Diagonal hatch for a device the hub can't reach. A texture reads as a
     // different *kind* of state; a dimmed copy of the card just reads as "off".
     component Hatch: Canvas {
@@ -253,12 +295,19 @@ Item {
 
         MouseArea {
             anchors.fill: parent
+            // Stays enabled for a tile that can't be controlled: an unreachable
+            // device is the one you most want to copy the identity of. What a
+            // click does is decided here instead. MouseArea drops clicked() on
+            // the second press of a double click, so a tile toggles once and
+            // then copies, rather than toggling twice.
             enabled: !card.editingName && !card.confirmingUnlock
-                     && card.deviceOnline && (card.isControllable || card.isLock)
             onClicked: {
+                if (!card.deviceOnline || !(card.isControllable || card.isLock))
+                    return
                 card.forceActiveFocus(Qt.MouseFocusReason)
                 card.activate()
             }
+            onDoubleClicked: card.copyRequested(card.infoClip)
         }
 
         ColumnLayout {
@@ -311,9 +360,17 @@ Item {
             PC3.Label {
                 Layout.fillWidth: true
                 visible: !card.isLock && !card.editingName
-                         && (card.subLabel !== "" || !card.deviceOnline)
-                text: card.deviceOnline ? card.subLabel.toUpperCase() : "SIN RED"
-                color: card.secondColor
+                         && (card.subLabel !== "" || card.batteryLow || !card.deviceOnline)
+                // A tile has one secondary line, so a battery worth worrying
+                // about shares it with the room: as a tile, a button has nowhere
+                // else to report it, and silence would read as "fine".
+                text: {
+                    if (!card.deviceOnline) return "SIN RED"
+                    const where = card.subLabel.toUpperCase()
+                    if (!card.batteryLow) return where
+                    return where !== "" ? where + " · " + card.battery : card.battery
+                }
+                color: card.batteryLow ? card.stateColor : card.secondColor
                 font.pixelSize: card.fontXS
                 font.bold: !card.deviceOnline
                 font.family: "monospace"
@@ -437,13 +494,31 @@ Item {
         }
 
         PC3.ToolButton {
+            // Opposite corner from the rename button rather than beside it: two
+            // buttons in the same corner reached into the middle of the tile,
+            // where the icon is, and sat on top of it.
+            anchors.top:  parent.top
+            anchors.left: parent.left
+            visible: !card.editingName && !card.confirmingUnlock && !card.reordering
+            opacity: tileHover.hovered ? 1 : 0
+            enabled: tileHover.hovered
+            icon.name: "documentinfo"
+            onClicked: card.infoRequested(card.infoTitle, card.infoBody)
+            QQC2.ToolTip.text: "Ficha del dispositivo"
+            QQC2.ToolTip.visible: hovered
+
+            Behavior on opacity { NumberAnimation { duration: 100 } }
+        }
+
+        PC3.ToolButton {
+            id: renameButton
             anchors.top:   parent.top
             anchors.right: parent.right
             // Present at all times, painted only on hover. Spawning it under the
             // pointer let it take hover from tileHover, which hid it again, which
             // gave hover back — the tile border blinked for as long as you rested
             // in the corner.
-            visible: !card.editingName && !card.confirmingUnlock
+            visible: !card.editingName && !card.confirmingUnlock && !card.reordering
             opacity: tileHover.hovered ? 1 : 0
             enabled: tileHover.hovered
             icon.name: "document-edit"
@@ -481,6 +556,15 @@ Item {
         }
 
         HoverHandler { id: rowHover }
+
+        // Declared below the controls, so a double click on a slider, a switch or
+        // the rename field belongs to that control and never reaches here. It
+        // leaves the wheel alone, which keeps the list scrolling over a row.
+        MouseArea {
+            anchors.fill: parent
+            enabled: !card.editingName
+            onDoubleClicked: card.copyRequested(card.infoClip)
+        }
 
         ColumnLayout {
             id: listInner
@@ -536,11 +620,24 @@ Item {
                 }
 
                 PC3.ToolButton {
+                    // Same reveal-by-opacity trick as the rename button below.
+                    visible: !card.editingName && !card.reordering
+                    opacity: rowHover.hovered ? 1 : 0
+                    enabled: rowHover.hovered
+                    icon.name: "documentinfo"
+                    onClicked: card.infoRequested(card.infoTitle, card.infoBody)
+                    QQC2.ToolTip.text: "Ficha del dispositivo"
+                    QQC2.ToolTip.visible: hovered
+
+                    Behavior on opacity { NumberAnimation { duration: 100 } }
+                }
+
+                PC3.ToolButton {
                     // Holds its slot in the layout whether or not it is showing.
                     // Revealing it with `visible` grew the row's implicit height,
                     // which grew card.height, which reflowed the grid under the
                     // pointer — hover then oscillated and the border blinked.
-                    visible: !card.editingName
+                    visible: !card.editingName && !card.reordering
                     opacity: rowHover.hovered ? 1 : 0
                     enabled: rowHover.hovered
                     icon.name: "document-edit"
@@ -959,6 +1056,37 @@ Item {
                     font.pixelSize: card.fontXS; font.family: "monospace"
                 }
             }
+        }
+    }
+    // ── Reorder veil ──────────────────────────────────────────────────────────
+    // Last child, so it covers the card whole — sliders, switches and buttons
+    // included. A drag that begins on a volume bar has to move the card, not the
+    // volume, and that is only true if nothing underneath ever sees the press.
+    MouseArea {
+        id: reorderVeil
+        anchors.fill: parent
+        visible: card.reordering
+        enabled: card.reordering
+        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+        // The device list is a Flickable: without this it reads a horizontal
+        // drag as a scroll and takes the grab away mid-reorder.
+        preventStealing: true
+
+        onPositionChanged: (mouse) => {
+            if (!pressed) return
+            const p = mapToItem(null, mouse.x, mouse.y)
+            card.reorderDragged(card.modelKey, p.x, p.y)
+        }
+        onReleased: card.reorderDropped()
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 2
+            // Teal wash while held: the card being carried has to stand out from
+            // the ones flowing around it.
+            color: reorderVeil.pressed ? "#333DA0AB" : "transparent"
+            border.color: card.structColor
+            border.width: 1
         }
     }
 }
