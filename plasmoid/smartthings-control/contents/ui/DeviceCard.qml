@@ -58,6 +58,8 @@ Item {
     signal playbackRequested(string id, string command)
     signal acModeSet(string id, string mode)
     signal setpointSet(string id, int value)
+    // A wheel turn over a slider scrolls the list instead of moving the slider.
+    signal scrollRequested(real delta)
 
     // 4:3 rather than square: an icon, a name and a room fit in three quarters of
     // the height, which buys a whole extra row of devices in the same popup.
@@ -194,6 +196,18 @@ Item {
         onWidthChanged:     requestPaint()
         onHeightChanged:    requestPaint()
         onLineColorChanged: requestPaint()
+    }
+
+    // A slider under the cursor must not eat the wheel: scrolling the list past a
+    // volume bar would nudge the volume instead. `wheelEnabled: false` doesn't help
+    // — org.kde.desktop's Slider does its own wheel handling in the background item
+    // (QTBUG-93081) — so this sits above it, swallows the event and scrolls the list.
+    // Worse than the nudge, that handler calls increase(), which breaks the value
+    // binding and leaves the bar out of sync with the device.
+    component SliderWheelGuard: MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.NoButton
+        onWheel: wheel => card.scrollRequested(wheel.angleDelta.y || -wheel.angleDelta.x)
     }
 
     Timer {
@@ -730,6 +744,7 @@ Item {
                         if (!pressed)
                             card.brightnessSet(card.deviceId, Math.round(value))
                     }
+                    SliderWheelGuard {}
                 }
                 Text {
                     text: Math.round(card.brightness) + "%"
@@ -818,6 +833,7 @@ Item {
                             if (!pressed)
                                 card.volumeSet(card.deviceId, Math.round(value))
                         }
+                        SliderWheelGuard {}
                     }
                     Text {
                         text: Math.round(card.volume) + "%"

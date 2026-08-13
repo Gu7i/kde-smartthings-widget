@@ -339,6 +339,16 @@ PlasmoidItem {
                     Layout.fillHeight: true
                     clip: true
 
+                    // Wheel turns that a slider swallowed are handed back here, so
+                    // the list still scrolls when the cursor sits on a volume bar.
+                    // 120 angle units is one notch; three lines each, as elsewhere.
+                    function scrollBy(delta) {
+                        const flick = contentItem
+                        const max = Math.max(0, flick.contentHeight - flick.height)
+                        flick.contentY = Math.max(0, Math.min(max,
+                            flick.contentY - (delta / 120) * Kirigami.Units.gridUnit * 3))
+                    }
+
                     ColumnLayout {
                         width: scrollView.availableWidth
                         spacing: 4
@@ -374,6 +384,7 @@ PlasmoidItem {
                                     onPlaybackRequested:  (id, cmd) => mediaCmd(id, cmd)
                                     onAcModeSet:          (id, mode) => setAcMode(id, mode)
                                     onSetpointSet:        (id, val) => setSetpoint(id, val)
+                                    onScrollRequested:    (delta) => scrollView.scrollBy(delta)
                                 }
                             }
                         }
