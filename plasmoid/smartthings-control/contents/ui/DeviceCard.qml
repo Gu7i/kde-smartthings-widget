@@ -50,6 +50,8 @@ Item {
     // appliance
     required property string machineState
     required property string jobState
+    // Warnings + errors the daemon logged for this device in the last 24 h.
+    required property int    issues
 
     property bool tile: false
     property bool reordering: false
@@ -69,6 +71,8 @@ Item {
     signal scrollRequested(real delta)
     signal copyRequested(string text)
     signal infoRequested(string title, string body)
+    // Open the history tab filtered to this device.
+    signal historyRequested(string id)
     // Scene coordinates: the card is being dragged past its own siblings, so the
     // only frame both ends agree on is the window's.
     signal reorderDragged(string key, real sceneX, real sceneY)
@@ -218,6 +222,38 @@ Item {
     readonly property string infoBody:
         infoBlock + (deviceOnline ? "" : "\nESTADO SIN RED")
     readonly property string infoClip: infoTitle + "\n" + infoBody
+
+    // A device the history has something to say about. Coral outline rather than
+    // a fill: it is a pointer to the history, not a state of the device — a
+    // filled coral chip would read as "on".
+    component IssueBadge: Rectangle {
+        visible: card.issues > 0 && !card.reordering
+        implicitWidth:  Math.max(issueLabel.implicitWidth + 6, implicitHeight)
+        implicitHeight: Math.round(card.fontXS * 1.7)
+        color: card.offlineSurf
+        border.color: card.stateColor
+        border.width: 1
+
+        Text {
+            id: issueLabel
+            anchors.centerIn: parent
+            text: "!" + card.issues
+            font.family: "monospace"
+            font.bold: true
+            font.pixelSize: card.fontXS
+            color: card.stateColor
+        }
+        MouseArea {
+            id: issueArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: card.historyRequested(card.deviceId)
+            QQC2.ToolTip.text: card.issues + (card.issues === 1 ? " incidencia" : " incidencias")
+                               + " en 24 h · ver historial"
+            QQC2.ToolTip.visible: containsMouse
+        }
+    }
 
     // Diagonal hatch for a device the hub can't reach. A texture reads as a
     // different *kind* of state; a dimmed copy of the card just reads as "off".
@@ -510,6 +546,13 @@ Item {
             Behavior on opacity { NumberAnimation { duration: 100 } }
         }
 
+        IssueBadge {
+            anchors { top: parent.top; right: parent.right; margins: 3 }
+            // The rename button takes this corner on hover.
+            opacity: tileHover.hovered ? 0 : 1
+            enabled: !tileHover.hovered
+        }
+
         PC3.ToolButton {
             id: renameButton
             anchors.top:   parent.top
@@ -609,6 +652,10 @@ Item {
                         card.renameRequested(card.modelKey, nameField.text.trim())
                         card.editingName = false
                     }
+                }
+
+                IssueBadge {
+                    visible: card.issues > 0 && !card.reordering && !card.editingName
                 }
 
                 Text {

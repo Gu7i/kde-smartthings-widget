@@ -19,6 +19,9 @@ Endpoints:
   POST /auth/start         → begin OAuth flow (returns authorization URL)
   GET  /callback           → OAuth redirect target
   GET  /status             → daemon health
+  GET  /events             → history, newest first (?device=&level=&since=&limit=)
+  GET  /events/summary     → warnings/errors per device (?hours=24)
+  POST /events/clear       → wipe the history
 """
 
 import json
@@ -31,6 +34,8 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from event_log import EventLog
 
 CONFIG_FILE        = Path.home() / ".config" / "smartthings-widget" / "config.json"
 CHANNEL_NAMES_FILE = Path.home() / ".config" / "smartthings-widget" / "channel_names.json"
@@ -176,6 +181,156 @@ _auth_state: dict = {"pending": False, "error": None}
 # Motion sensor notification tracking: device_id → already-notified
 _motion_alerted: set[str] = set()
 
+_events: EventLog | None = None   # created in main(); see event_log.py
+
+
+# ── History ───────────────────────────────────────────────────────────────────
+# What goes in: anything that changes what a device *is doing* (on/off, mode,
+# input, cycle…), every command and its outcome, and every failure to reach
+# the cloud. What stays out: readings that drift on their own (temperature,
+# humidity, volume, brightness) — they would bury the events that matter.
+
+ON_OFF = {True: "Encendido", False: "Apagado"}
+
+def _describe_change(key: str, old, new) -> tuple[str, str] | None:
+    """(level, message) for one state field, or None if not worth a row."""
+    if key == "on":
+        return "info", ON_OFF.get(new, str(new))
+    if key == "locked":
+        return ("info", "Cerrada") if new else ("warn", "Abierta")
+    if key == "motion":
+        return ("info", "Movimiento detectado") if new else None
+    if key == "mode":
+        return "info", f"Modo {old or '—'} → {new or '—'}"
+    if key == "setpoint":
+        return "info", f"Consigna {old}° → {new}°"
+    if key == "input":
+        return "info", f"Entrada {old or '—'} → {new or '—'}"
+    if key == "machine_state":
+        return "info", f"Máquina {old or '—'} → {new or '—'}"
+    if key == "job_state":
+        return "info", f"Ciclo {old or '—'} → {new or '—'}"
+    if key == "battery":
+        # Only the crossing into "low" is news; every 1 % step is not.
+        if isinstance(new, (int, float)) and new <= 20 and \
+           not (isinstance(old, (int, float)) and old <= 20):
+            return "warn", f"Batería baja ({round(new)}%)"
+        return None
+    return None
+
+
+def _diff_and_log(old: dict, new: dict) -> None:
+    if _events is None:
+        return
+    aliases = _load_aliases()
+    for did, dev in new.items():
+        name = aliases.get(did) or dev.get("name", did)
+        prev = old.get(did)
+        if prev is None:
+            # New to the cache. On the first sweep after a start that is every
+            # device, so only the ones already unreachable are worth a row.
+            if old:
+                _events.add("info", "state", "Dispositivo nuevo",
+                            device_id=did, device_name=name)
+            if not dev.get("online", True):
+                _events.add("warn", "connectivity", "Sin conexión",
+                            device_id=did, device_name=name)
+            continue
+
+        if prev.get("online", True) != dev.get("online", True):
+            if dev.get("online", True):
+                _events.add("info", "connectivity", "Conectado de nuevo",
+                            device_id=did, device_name=name)
+            else:
+                _events.add("warn", "connectivity", "Sin conexión",
+                            device_id=did, device_name=name)
+
+        # A failed read carries the previous state forward (see fetch_devices),
+        # so there is nothing to compare — and comparing would be a lie.
+        if dev.get("stale"):
+            continue
+
+        ps, ns = prev.get("state") or {}, dev.get("state") or {}
+        for key in ("on", "locked", "motion", "mode", "setpoint", "input",
+                    "machine_state", "job_state", "battery"):
+            if key not in ns or ps.get(key) == ns.get(key):
+                continue
+            if key not in ps:
+                continue                   # first reading, not a change
+            d = _describe_change(key, ps.get(key), ns.get(key))
+            if d:
+                _events.add(d[0], "state", d[1], device_id=did, device_name=name)
+
+        pch, nch = ps.get("channels") or [], ns.get("channels") or []
+        if len(pch) == len(nch):
+            for i, (a, b) in enumerate(zip(pch, nch)):
+                if a != b:
+                    ch = aliases.get(f"{did}_{i}") or f"Canal {i + 1}"
+                    _events.add("info", "state", f"{ch}: {ON_OFF.get(b, b)}",
+                                device_id=did, device_name=name)
+
+    for did, dev in old.items():
+        if did not in new:
+            _events.add("warn", "state", "Ya no aparece en SmartThings",
+                        device_id=did,
+                        device_name=aliases.get(did) or dev.get("name", did))
+
+
+def _on_device_error(did: str, name: str, op: str, exc: Exception) -> None:
+    if _events is None:
+        return
+    what = {"status": "No se pudo leer el estado",
+            "health": "No se pudo leer la conexión"}.get(op, f"Falló {op}")
+    short = exc.short() if hasattr(exc, "short") else type(exc).__name__
+    _events.add("error", "cloud", f"{what} · {short}",
+                device_id=did, device_name=_load_aliases().get(did) or name,
+                detail=str(exc), key=f"cloud:{op}:{short}")
+
+
+# Command → how it reads in the history.
+_ACTION_LABEL = {
+    "on": "Encender", "off": "Apagar", "lock": "Cerrar", "unlock": "Abrir",
+    "play": "Play", "pause": "Pausa", "stop": "Stop",
+}
+
+def _command_label(action: str, patch: dict, value) -> str:
+    if action == "toggle":
+        if "channels" in patch:
+            return "Alternar canal"
+        return "Encender" if patch.get("on") else "Apagar"
+    if action == "brightness": return f"Brillo {value}%"
+    if action == "volume":     return f"Volumen {value}"
+    if action == "mode":       return f"Modo {value}"
+    if action == "setpoint":   return f"Consigna {value}°"
+    return _ACTION_LABEL.get(action, action)
+
+
+_VERIFY_KEYS = {"on", "channels", "locked", "mode", "setpoint"}
+
+
+def _verify_command(did: str, label: str, patch: dict) -> None:
+    """After the reconcile, does the cloud agree with what we asked for?
+
+    SmartThings answers ACCEPTED for commands a device then ignores — a washer
+    with Smart Control off, a TV in standby. This is the only place that
+    difference shows up, so it is worth a warning of its own."""
+    if _events is None:
+        return
+    dev = _client.devices.get(did)
+    if not dev or dev.get("stale"):
+        return
+    state = dev.get("state") or {}
+    # Only fields devices report faithfully: TVs never report playback, and
+    # volume/brightness come back rounded or clamped.
+    off = [k for k, v in patch.items()
+           if k in _VERIFY_KEYS and k in state and state[k] != v]
+    if off:
+        got = ", ".join(f"{k}={state[k]}" for k in off)
+        _events.add("warn", "command", f"{label} · aceptado pero sin efecto",
+                    device_id=did,
+                    device_name=_load_aliases().get(did) or dev.get("name", did),
+                    detail=f"Pedido: {patch} · Estado real tras 6 s: {got}")
+
 
 def _notify(title: str, body: str) -> None:
     try:
@@ -211,7 +366,12 @@ def _refresh_now() -> dict:
         with _refresh_gate:
             return _client.devices
     try:
+        old = _client.devices
         devices = _client.fetch_devices()
+        try:
+            _diff_and_log(old, devices)
+        except Exception as e:          # history must never break a sweep
+            print(f"[events] {e}", file=sys.stderr)
         _check_motion(devices)
         _last_error = None
         _last_refresh = time.time()
@@ -228,6 +388,10 @@ def _refresh_loop():
         except Exception as e:
             _last_error = str(e)
             print(f"[refresh] {e}", file=sys.stderr)
+            if _events is not None:
+                short = e.short() if hasattr(e, "short") else str(e)[:120]
+                _events.add("error", "daemon", f"Falló el barrido del cloud · {short}",
+                            detail=str(e), key=f"sweep:{short}")
         time.sleep(POLL_INTERVAL)
 
 
@@ -325,14 +489,40 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/devices":
             aliases = _load_aliases()
+            # Warnings + errors in the last 24 h, so a card can flag itself.
+            # Copied, not set: the dicts are shared with the client's cache.
+            issues = _events.summary(24)
+            out = []
+            for d in _client.devices.values():
+                row = issues.get(d["id"])
+                out.append({**_with_aliases(d, aliases),
+                            "issues": (row["errors"] + row["warnings"]) if row else 0})
             # The body is the cache; the header says how old the cloud read is,
             # so a client can show real freshness instead of "just re-read it".
-            self._send_json(200,
-                            [_with_aliases(d, aliases) for d in _client.devices.values()],
-                            {"X-Last-Refresh": f"{_last_refresh:.3f}"})
+            self._send_json(200, out, {"X-Last-Refresh": f"{_last_refresh:.3f}"})
 
         elif path == "/aliases":
             self._send_json(200, _load_aliases())
+
+        elif path == "/events":
+            def q(name, default=""):
+                return (query.get(name) or [default])[0]
+            try:
+                limit = max(1, min(2000, int(q("limit", "300"))))
+                since = float(q("since", "0") or 0)
+            except ValueError:
+                self._send_json(400, {"error": "bad limit/since"})
+                return
+            self._send_json(200, _events.query(device_id=q("device"),
+                                               min_level=q("level", "info"),
+                                               since=since, limit=limit))
+
+        elif path == "/events/summary":
+            try:
+                hours = float((query.get("hours") or ["24"])[0])
+            except ValueError:
+                hours = 24
+            self._send_json(200, _events.summary(hours))
 
         elif path == "/order":
             self._send_json(200, _load_order())
@@ -386,6 +576,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"[refresh] {e}", file=sys.stderr)
                 self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        if path == "/events/clear":
+            _events.clear()
+            _events.add("info", "daemon", "Historial borrado")
+            self._send_json(200, {"ok": True})
             return
 
         # /alias  → local rename of any device or channel ("" restores the original)
@@ -456,6 +652,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             outlet = body.get("outlet")
+            patch: dict = {}
 
             # Work out the optimistic patch + the cloud call up front, so we can
             # update the cache BEFORE the (~1 s) cloud round-trip. That way a
@@ -510,9 +707,17 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 _client.patch_state(did, patch)  # optimistic, before the cloud call
+                label = _command_label(action, patch, body.get("value"))
+                dname = _load_aliases().get(did) or dev.get("name", did)
                 ok = run()
             except Exception as e:
                 print(f"[control] {did} {action}: {e}", file=sys.stderr, flush=True)
+                short = e.short() if hasattr(e, "short") else type(e).__name__
+                _events.add("error", "command",
+                            f"{_command_label(action, patch, body.get('value'))} · falló · {short}",
+                            device_id=did,
+                            device_name=_load_aliases().get(did) or dev.get("name", did),
+                            detail=str(e))
                 try:
                     _client.refresh_device(did)  # undo the optimistic guess
                 except Exception:
@@ -521,16 +726,26 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if ok:
+                # Sliders send a burst of values; one row per drag is enough.
+                _events.add("info", "command", f"{label} · OK",
+                            device_id=did, device_name=dname,
+                            key=f"cmd:{action}" if action in ("volume", "brightness",
+                                                             "setpoint") else "",
+                            window=30)
                 # Reconcile with the real cloud state once SmartThings has caught
                 # up, so a silently-failed command self-corrects.
-                def _reconcile(device_id=did):
+                def _reconcile(device_id=did, label=label, patch=patch):
                     time.sleep(6)
                     try:
                         _client.refresh_device(device_id)
+                        _verify_command(device_id, label, patch)
                     except Exception:
                         pass
                 threading.Thread(target=_reconcile, daemon=True).start()
             else:
+                _events.add("error", "command", f"{label} · rechazado",
+                            device_id=did, device_name=dname,
+                            detail="SmartThings no devolvió ACCEPTED/COMPLETED")
                 # Command rejected: correct the optimistic cache right away.
                 try:
                     _client.refresh_device(did)
@@ -573,10 +788,16 @@ def main():
     )
     _client.on_token_refresh = save_tokens
 
+    global _events
+    _events = EventLog()
+    _client.on_device_error = _on_device_error
+    _events.add("info", "daemon", "Daemon iniciado")
+
     print("Fetching devices…")
     try:
         devices = _client.fetch_devices()
         print(f"Found {len(devices)} devices")
+        _diff_and_log({}, devices)          # logs the ones already unreachable
     except Exception as e:
         print(f"Initial device fetch failed: {e}", file=sys.stderr)
 

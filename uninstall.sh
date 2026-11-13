@@ -45,7 +45,9 @@ echo ""
 echo "[3/4] Removing plasmoid files…"
 rm -rf "$HOME/.local/share/plasma/plasmoids/org.kde.smartthings-control"
 rm -rf "$HOME/.cache/plasmashell/qmlcache/" 2>/dev/null || true
-echo "  Plasmoid removed."
+# Event history: state, not configuration, so it goes without asking.
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/smartthings-widget"
+echo "  Plasmoid and event history removed."
 
 # ── 4. Optionally remove credentials ─────────────────────────────────────────
 echo ""

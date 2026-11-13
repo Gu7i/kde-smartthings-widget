@@ -92,6 +92,27 @@ def set_credentials(client_id: str, client_secret: str) -> None:
 
 # ── Low-level HTTP ────────────────────────────────────────────────────────────
 
+class ApiError(RuntimeError):
+    """A SmartThings call that came back >= 400.
+
+    Still a RuntimeError, so existing handlers keep working; the fields are
+    what a diagnosis needs: the HTTP status, SmartThings' own error code, and
+    the requestId their support asks for."""
+
+    def __init__(self, method: str, path: str, status: int, data):
+        err = data.get("error") if isinstance(data, dict) else None
+        self.status     = status
+        self.code       = err.get("code", "") if isinstance(err, dict) else ""
+        self.request_id = data.get("requestId", "") if isinstance(data, dict) else ""
+        self.message    = (err.get("message", "") if isinstance(err, dict)
+                           else (err if isinstance(err, str) else ""))
+        super().__init__(f"{method} {path} → {status}: {data}")
+
+    def short(self) -> str:
+        """One line for the history: 'HTTP 500 UnexpectedError'."""
+        return " ".join(p for p in (f"HTTP {self.status}", self.code) if p)
+
+
 def _http(method: str, url: str, *, token: str | None = None,
           form: dict | None = None, json_body: dict | None = None,
           basic: bool = False) -> tuple[int, dict]:
@@ -197,6 +218,9 @@ class SmartThingsClient:
         # Called with (access_token, refresh_token) whenever tokens rotate,
         # so the daemon can persist them to config.
         self.on_token_refresh = None
+        # Called with (device_id, device_name, operation, exception) when a
+        # per-device read fails during a sweep, so the daemon can record it.
+        self.on_device_error = None
 
     # ── Authenticated requests with transparent token refresh ────────────────
 
@@ -206,7 +230,7 @@ class SmartThingsClient:
             self._ensure_token()
             status, data = _http("GET", f"{API_BASE}{path}", token=self.access_token)
         if status >= 400:
-            raise RuntimeError(f"GET {path} → {status}: {data}")
+            raise ApiError("GET", path, status, data)
         return data
 
     def _post(self, path: str, body: dict) -> dict:
@@ -217,7 +241,7 @@ class SmartThingsClient:
             status, data = _http("POST", f"{API_BASE}{path}",
                                  token=self.access_token, json_body=body)
         if status >= 400:
-            raise RuntimeError(f"POST {path} → {status}: {data}")
+            raise ApiError("POST", path, status, data)
         return data
 
     def _ensure_token(self) -> None:
@@ -304,6 +328,7 @@ class SmartThingsClient:
                 "switch_components": switch_components,
                 "categories":        sorted(categories),
                 "state":             {},
+                "stale":             False,    # True when this sweep's read failed
                 **_identity(dev),
             }
 
@@ -319,16 +344,24 @@ class SmartThingsClient:
                 dev["state"]  = dict(old[did].get("state", {}))
                 dev["online"] = old[did].get("online", True)
                 return
+            # A failed read keeps the last known value. Before, a 500 on
+            # /status left the state empty, so a TV that was on rendered as
+            # off until the next sweep happened to succeed.
+            prev = old.get(did, {})
             try:
                 status = self._get(f"/v1/devices/{did}/status")
                 dev["state"] = _extract_state(dev, status)
             except Exception as exc:
                 print(f"[status] {did}: {exc}", flush=True)
+                dev["state"] = dict(prev.get("state", {}))
+                dev["stale"] = True
+                self._report(did, dev["name"], "status", exc)
             try:
                 health = self._get(f"/v1/devices/{did}/health")
                 dev["online"] = health.get("state") == "ONLINE"
-            except Exception:
-                pass
+            except Exception as exc:
+                dev["online"] = prev.get("online", True)
+                self._report(did, dev["name"], "health", exc)
 
         if devices:
             with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(devices))) as pool:
@@ -337,6 +370,13 @@ class SmartThingsClient:
         with self._lock:
             self._devices = devices
         return devices
+
+    def _report(self, did: str, name: str, op: str, exc: Exception) -> None:
+        if self.on_device_error:
+            try:
+                self.on_device_error(did, name, op, exc)
+            except Exception as e:      # the history must never break a sweep
+                print(f"[events] {e}", flush=True)
 
     def refresh_device(self, device_id: str) -> None:
         """Re-fetch a single device's status (cheap: ~1 request vs. a full poll).
@@ -355,6 +395,7 @@ class SmartThingsClient:
                 self._hold.pop(device_id, None)
         except Exception as exc:
             print(f"[status] {device_id}: {exc}", flush=True)
+            self._report(device_id, dev.get("name", ""), "status", exc)
 
     def patch_state(self, device_id: str, patch: dict, hold: float = 6.0) -> None:
         """Merge an optimistic state patch into the cache so the widget's

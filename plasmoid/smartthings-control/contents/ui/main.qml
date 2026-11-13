@@ -54,7 +54,11 @@ PlasmoidItem {
         { label: "Sensores",   types: ["sensor"] },
         { label: "Botones",    types: ["button"] },
         { label: "Hubs",       types: ["hub"] },
+        // Not a device type: the daemon's event log. Always shown, last.
+        { label: "Historial",  types: [], history: true },
     ]
+    readonly property int historyTab: tabDefs.length - 1
+    readonly property bool historyActive: activeTab === historyTab
 
     preferredRepresentation: compactRepresentation
     toolTipMainText: "SmartThings Control"
@@ -257,7 +261,8 @@ PlasmoidItem {
                     QQC2.TextField {
                         id: searchField
                         Layout.fillWidth: true
-                        placeholderText: "Buscar dispositivo…"
+                        placeholderText: root.historyActive ? "Buscar en el historial…"
+                                                            : "Buscar dispositivo…"
                         font.family: "monospace"
                         font.pixelSize: root.fontS
                         text: root.searchText
@@ -315,7 +320,9 @@ PlasmoidItem {
                                 font.pixelSize: root.fontXS
                                 font.family: "monospace"
                                 font.letterSpacing: 1
-                                color: parent.active ? root.popupColor : root.secondColor
+                                color: parent.active ? root.popupColor
+                                     : (parent.modelData === root.historyTab && parent.count > 0)
+                                       ? root.stateColor : root.secondColor
                             }
 
                             MouseArea {
@@ -459,6 +466,7 @@ PlasmoidItem {
                                     onScrollRequested:    (delta) => scrollView.scrollBy(delta)
                                     onCopyRequested:      (text) => copyToClipboard(text, "COPIADO AL PORTAPAPELES")
                                     onInfoRequested:      (title, body) => infoPanel.show(title, body)
+                                    onHistoryRequested:   (id) => root.openHistory(id)
                                     reordering: root.reordering
                                     onReorderDragged:     (key, sx, sy) => {
                                         // Scene coordinates, so the card under
@@ -471,6 +479,169 @@ PlasmoidItem {
                                     }
                                     onReorderDropped:     () => saveOrder()
                                 }
+                            }
+                        }
+
+                        // ── History ───────────────────────────────────────────
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            visible: root.historyActive && root.daemonOk
+                            spacing: Kirigami.Units.smallSpacing
+
+                            // Filters and actions, one row.
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+
+                                PanelButton {
+                                    label: "TODO"
+                                    active: !root.historyOnlyIssues
+                                    onClicked: root.historyOnlyIssues = false
+                                }
+                                PanelButton {
+                                    label: "SOLO FALLOS"
+                                    active: root.historyOnlyIssues
+                                    tint: root.stateColor
+                                    onClicked: root.historyOnlyIssues = true
+                                }
+                                // The device filter, as a removable chip.
+                                PanelButton {
+                                    visible: root.historyDevice !== ""
+                                    label: "✕ " + root.historyDeviceName.toUpperCase()
+                                    active: true
+                                    Layout.maximumWidth: Kirigami.Units.gridUnit * 9
+                                    onClicked: root.historyDevice = ""
+                                }
+
+                                Item { Layout.fillWidth: true }
+
+                                PanelButton {
+                                    label: "COPIAR"
+                                    visible: root.filteredEvents.length > 0
+                                    onClicked: root.copyToClipboard(root.historyReport(),
+                                                                    "HISTORIAL COPIADO")
+                                }
+                                // Two steps: wiping the history is the one thing
+                                // here that cannot be undone.
+                                PanelButton {
+                                    label: root.confirmingClear ? "¿BORRAR TODO?" : "LIMPIAR"
+                                    tint: root.stateColor
+                                    active: root.confirmingClear
+                                    onClicked: {
+                                        if (root.confirmingClear) {
+                                            root.confirmingClear = false
+                                            root.clearHistory()
+                                        } else {
+                                            root.confirmingClear = true
+                                            clearConfirmTimer.restart()
+                                        }
+                                    }
+                                    Timer {
+                                        id: clearConfirmTimer
+                                        interval: 4000
+                                        onTriggered: root.confirmingClear = false
+                                    }
+                                }
+                            }
+
+                            // Which devices are sick, worst first. A chip filters
+                            // the list to that device — the usual next question.
+                            Text {
+                                visible: root.issueDevices.length > 0 && root.historyDevice === ""
+                                text: "CON INCIDENCIAS · 24 H"
+                                font.family: "monospace"
+                                font.bold: true
+                                font.pixelSize: root.fontXS
+                                font.letterSpacing: 1
+                                color: root.secondColor
+                            }
+
+                            Flow {
+                                Layout.fillWidth: true
+                                visible: root.issueDevices.length > 0 && root.historyDevice === ""
+                                spacing: 4
+
+                                Repeater {
+                                    model: root.issueDevices
+
+                                    Rectangle {
+                                        required property var modelData
+                                        width:  chipRow.implicitWidth + Kirigami.Units.smallSpacing * 3
+                                        height: Math.round(root.fontS * 2.3)
+                                        color: chipArea.containsMouse ? "#2E2320" : "#2A2A2A"
+                                        border.color: modelData.errors > 0 ? root.stateColor : root.structDim
+                                        border.width: 1
+
+                                        Row {
+                                            id: chipRow
+                                            anchors.centerIn: parent
+                                            spacing: 6
+                                            Text {
+                                                text: parent.parent.modelData.device_name || "Daemon"
+                                                font.bold: true
+                                                font.pixelSize: root.fontS
+                                                color: root.creamColor
+                                            }
+                                            Text {
+                                                readonly property string room:
+                                                    root.roomById[parent.parent.modelData.device_id] || ""
+                                                visible: room !== ""
+                                                text: room.toUpperCase()
+                                                font.family: "monospace"
+                                                font.pixelSize: root.fontXS
+                                                color: root.secondColor
+                                                anchors.verticalCenter: parent.verticalCenter
+                                            }
+                                            Text {
+                                                visible: parent.parent.modelData.errors > 0
+                                                text: "✕" + parent.parent.modelData.errors
+                                                font.family: "monospace"
+                                                font.bold: true
+                                                font.pixelSize: root.fontXS
+                                                color: root.stateColor
+                                                anchors.verticalCenter: parent.verticalCenter
+                                            }
+                                            Text {
+                                                visible: parent.parent.modelData.warnings > 0
+                                                text: "!" + parent.parent.modelData.warnings
+                                                font.family: "monospace"
+                                                font.bold: true
+                                                font.pixelSize: root.fontXS
+                                                color: root.secondColor
+                                                anchors.verticalCenter: parent.verticalCenter
+                                            }
+                                        }
+                                        MouseArea {
+                                            id: chipArea
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.historyDevice =
+                                                parent.modelData.device_id || "_daemon"
+                                            QQC2.ToolTip.text: parent.modelData.last_message
+                                            QQC2.ToolTip.visible: containsMouse
+                                        }
+                                    }
+                                }
+                            }
+
+                            Repeater {
+                                model: root.filteredEvents
+                                EventRow {}
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                Layout.topMargin: Kirigami.Units.gridUnit
+                                visible: root.filteredEvents.length === 0
+                                horizontalAlignment: Text.AlignHCenter
+                                opacity: 0.55
+                                text: !root.eventsLoaded ? "// CARGANDO... //"
+                                    : root.historyOnlyIssues ? "// SIN FALLOS //"
+                                    : "// SIN EVENTOS //"
+                                font.family: "monospace"
+                                font.pixelSize: root.fontS
+                                color: root.structColor
                             }
                         }
 
@@ -587,6 +758,8 @@ PlasmoidItem {
                 open()
             }
 
+            Component.onCompleted: infoPanelProxy.panel = infoPanel
+
             // Declared inside the full representation on purpose: that is the
             // item that gets reparented into the popup window, so this is the
             // window the panel opens in. Hung off the applet root instead, it
@@ -638,7 +811,9 @@ PlasmoidItem {
                     color: root.creamColor
                     selectionColor: root.structColor
                     selectedTextColor: root.popupColor
-                    wrapMode: Text.NoWrap
+                    // Identity lines are short; an event's raw cloud error is
+                    // not, and must stay readable rather than run off the edge.
+                    wrapMode: Text.WrapAnywhere
                 }
 
                 RowLayout {
@@ -671,26 +846,130 @@ PlasmoidItem {
     // the moment it loses focus, taking the panel down with it.
     component PanelButton: Rectangle {
         property alias label: buttonLabel.text
+        // Filled while selected, like the tabs: a filter that is on has to look on.
+        property bool active: false
+        property color tint: root.structColor
         signal clicked
 
         implicitWidth:  buttonLabel.implicitWidth + Kirigami.Units.gridUnit
         implicitHeight: Math.round(root.fontS * 2.4)
-        color: "transparent"
-        border.color: root.structColor
+        color: active ? tint : "transparent"
+        border.color: tint
         border.width: 1
 
         Text {
             id: buttonLabel
             anchors.centerIn: parent
+            width: Math.min(implicitWidth, parent.width - Kirigami.Units.smallSpacing * 2)
+            elide: Text.ElideRight
             font.family: "monospace"
             font.bold: true
             font.pixelSize: root.fontXS
-            color: root.structColor
+            color: parent.active ? root.popupColor : parent.tint
         }
         MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
             onClicked: parent.clicked()
+        }
+    }
+
+    // ── History row ───────────────────────────────────────────────────────────
+    // Errors get the same treatment as a device that is on — warm ground plus a
+    // coral bar — because they are what the eye should land on. Warnings keep
+    // the bar but not the ground; plain events are just text, so a quiet day
+    // reads as quiet.
+    component EventRow: Rectangle {
+        required property var modelData
+        readonly property bool isError: modelData.level === "error"
+        readonly property bool isWarn:  modelData.level === "warn"
+
+        Layout.fillWidth: true
+        implicitHeight: rowCol.implicitHeight + Kirigami.Units.smallSpacing * 2
+        color: isError ? "#2E2320" : (rowArea.containsMouse ? "#262626" : "transparent")
+        border.color: root.structColor
+        border.width: rowArea.containsMouse ? 1 : 0
+
+        Rectangle {
+            anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+            width: 3
+            visible: parent.isError || parent.isWarn
+            color: root.stateColor
+            opacity: parent.isError ? 1 : 0.5
+        }
+
+        ColumnLayout {
+            id: rowCol
+            anchors {
+                left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter
+                leftMargin: Kirigami.Units.smallSpacing * 2 + 3
+                rightMargin: Kirigami.Units.smallSpacing * 2
+            }
+            spacing: 1
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+
+                Text {
+                    text: root.formatTime(modelData.last_ts)
+                    font.family: "monospace"
+                    font.pixelSize: root.fontXS
+                    color: root.secondColor
+                }
+                Text {
+                    // Takes what it needs up to 60 %; the room gets the rest.
+                    Layout.maximumWidth: Math.round(rowCol.width * 0.6)
+                    text: modelData.device_name || "Daemon"
+                    elide: Text.ElideRight
+                    font.bold: true
+                    font.pixelSize: root.fontS
+                    color: root.creamColor
+                }
+                // Names repeat ("Motion Sensor" twice); the room tells them apart.
+                Text {
+                    Layout.fillWidth: true
+                    text: (root.roomById[modelData.device_id] || "").toUpperCase()
+                    elide: Text.ElideRight
+                    font.family: "monospace"
+                    font.pixelSize: root.fontXS
+                    color: root.secondColor
+                }
+                Text {
+                    visible: modelData.count > 1
+                    text: "×" + modelData.count + " · desde " + root.formatTime(modelData.ts)
+                    font.family: "monospace"
+                    font.pixelSize: root.fontXS
+                    color: isError ? root.stateColor : root.secondColor
+                }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: modelData.message
+                wrapMode: Text.Wrap
+                font.family: "monospace"
+                font.pixelSize: root.fontXS
+                color: (isError || isWarn) ? root.stateColor : root.secondColor
+            }
+        }
+
+        MouseArea {
+            id: rowArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: infoPanelProxy.show(modelData)
+        }
+    }
+
+    // EventRow lives at the root but the info panel lives inside the full
+    // representation, whose ids are out of scope here (see reorderTo). The panel
+    // registers itself on this object when it is created.
+    QtObject {
+        id: infoPanelProxy
+        property var panel: null
+        function show(ev) {
+            if (panel) panel.show(ev.device_name || "Daemon", root.eventDetail(ev))
         }
     }
 
@@ -710,6 +989,14 @@ PlasmoidItem {
     property var customOrder: []
     property bool reordering: false
     property bool orderDirty: false          // a drag moved something since the drop
+    // History (the daemon's event log). Fetched only while that tab is open.
+    property var events: []
+    property var eventSummary: ({})
+    property bool eventsLoaded: false
+    property bool historyOnlyIssues: false
+    property string historyDevice: ""        // device id, "_daemon", or "" for all
+    property bool confirmingClear: false
+
     // Bumped on every model rebuild: ListModel changes don't invalidate bindings
     // on their own, so anything derived from the model depends on this instead.
     property int modelRevision: 0
@@ -727,6 +1014,62 @@ PlasmoidItem {
         return out
     }
 
+    // deviceId → room, for filtering history rows by the room selector.
+    readonly property var roomById: {
+        modelRevision
+        var out = ({})
+        for (var i = 0; i < deviceModel.count; i++) {
+            var it = deviceModel.get(i)
+            out[it.deviceId] = it.roomName
+        }
+        return out
+    }
+
+    // Warnings + errors in 24 h across all devices; a multi-switch appears once
+    // per channel in the model, so count each device id once.
+    readonly property int issuesTotal: {
+        modelRevision
+        var seen = ({}), n = 0
+        for (var i = 0; i < deviceModel.count; i++) {
+            var it = deviceModel.get(i)
+            if (seen[it.deviceId]) continue
+            seen[it.deviceId] = true
+            n += it.issues
+        }
+        return n
+    }
+
+    readonly property var issueDevices: {
+        var rows = Object.keys(eventSummary).map(k => eventSummary[k])
+        rows.sort((a, b) => (b.errors - a.errors) || (b.warnings - a.warnings)
+                            || (b.last_ts - a.last_ts))
+        return rows
+    }
+
+    readonly property string historyDeviceName: {
+        if (historyDevice === "") return ""
+        if (historyDevice === "_daemon") return "Daemon"
+        for (var i = 0; i < events.length; i++)
+            if (events[i].device_id === historyDevice) return events[i].device_name
+        var idx = findIndex(historyDevice)
+        return idx >= 0 ? deviceModel.get(idx).deviceName : "dispositivo"
+    }
+
+    readonly property var filteredEvents: {
+        var q = searchText.toLowerCase()
+        return events.filter(ev => {
+            if (historyOnlyIssues && ev.level === "info") return false
+            if (historyDevice === "_daemon" && ev.device_id !== "") return false
+            if (historyDevice !== "" && historyDevice !== "_daemon"
+                && ev.device_id !== historyDevice) return false
+            if (roomFilter !== "" && ev.device_id !== ""
+                && roomById[ev.device_id] !== roomFilter) return false
+            if (q === "") return true
+            return (ev.device_name || "").toLowerCase().indexOf(q) >= 0
+                || ev.message.toLowerCase().indexOf(q) >= 0
+        })
+    }
+
     // Tabs worth showing: those with results, plus the current one so the bar
     // never jumps out from under the selection.
     //
@@ -740,13 +1083,16 @@ PlasmoidItem {
     function rebuildVisibleTabs() {
         var out = []
         for (var t = 0; t < tabDefs.length; t++)
-            if ((tabCounts[t] || 0) > 0 || activeTab === t) out.push(t)
+            if ((tabCounts[t] || 0) > 0 || activeTab === t || tabDefs[t].history) out.push(t)
         if (out.length === visibleTabs.length
             && out.every((v, i) => v === visibleTabs[i])) return
         visibleTabs = out
     }
 
-    onActiveTabChanged:    rebuildVisibleTabs()
+    onActiveTabChanged: {
+        rebuildVisibleTabs()
+        if (historyActive) fetchEvents()
+    }
     onTabCountsChanged:    rebuildVisibleTabs()
     Component.onCompleted: {
         rebuildVisibleTabs()
@@ -758,6 +1104,7 @@ PlasmoidItem {
         var counts = []
         for (var t = 0; t < tabDefs.length; t++) {
             var n = 0
+            if (tabDefs[t].history) { counts.push(issuesTotal); continue }
             for (var i = 0; i < deviceModel.count; i++) {
                 var it = deviceModel.get(i)
                 if (matchesFilters(it.modelKey, it.deviceType, it.deviceName,
@@ -782,6 +1129,7 @@ PlasmoidItem {
     readonly property string emptyState: {
         if (!daemonOk)                        return "// DAEMON OFFLINE //"
         if (!everLoaded)                      return "// CARGANDO... //"
+        if (historyActive)                    return ""   // has its own
         if (deviceModel.count === 0)          return "// SIN DISPOSITIVOS //"
         if ((tabCounts[activeTab] || 0) > 0)  return ""
         if (searchText !== "" || roomFilter !== "") return "// SIN RESULTADOS //"
@@ -810,8 +1158,10 @@ PlasmoidItem {
 
     // Keep the user on a tab that actually has results.
     function ensureUsefulTab() {
+        if (historyActive) return             // a quiet history is still the tab you chose
         if ((tabCounts[activeTab] || 0) > 0) return
         for (var t = 0; t < tabDefs.length; t++) {
+            if (tabDefs[t].history) continue
             if ((tabCounts[t] || 0) > 0) { activeTab = t; return }
         }
     }
@@ -830,7 +1180,10 @@ PlasmoidItem {
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: root.fetchDevices()
+        onTriggered: {
+            root.fetchDevices()
+            if (root.expanded && root.historyActive) root.fetchEvents()
+        }
     }
 
     Timer {   // relative-time label, only while the popup is visible
@@ -987,6 +1340,7 @@ PlasmoidItem {
                         acHumidity:   "",
                         machineState: "",
                         jobState:     "",
+                        issues:       d.issues ?? 0,
                     }
                     if (idx >= 0) deviceModel.set(idx, flat)
                     else          deviceModel.append(flat)
@@ -1052,6 +1406,7 @@ PlasmoidItem {
             // appliance
             machineState: s.machine_state ?? "",
             jobState:     s.job_state     ?? "",
+            issues:       d.issues ?? 0,
         }
     }
 
@@ -1276,6 +1631,105 @@ PlasmoidItem {
         xhr.onerror   = () => { showError(`Falló «${label}»: daemon sin respuesta`); fetchDevices() }
         xhr.ontimeout = () => { showError(`Falló «${label}»: sin respuesta`); fetchDevices() }
         xhr.send(bodyStr || "{}")
+    }
+
+    // ── History ───────────────────────────────────────────────────────────────
+
+    function openHistory(deviceId) {
+        historyDevice = deviceId
+        historyOnlyIssues = true
+        activeTab = historyTab
+    }
+
+    function fetchEvents() {
+        const xhr = new XMLHttpRequest()
+        xhr.open("GET", daemonUrl + "/events?limit=500")
+        xhr.timeout = 5000
+        xhr.onreadystatechange = () => {
+            if (xhr.readyState !== XMLHttpRequest.DONE || xhr.status !== 200) return
+            try {
+                events = JSON.parse(xhr.responseText)
+                eventsLoaded = true
+            } catch (e) { /* keep the previous list */ }
+        }
+        xhr.send()
+
+        const sx = new XMLHttpRequest()
+        sx.open("GET", daemonUrl + "/events/summary?hours=24")
+        sx.timeout = 5000
+        sx.onreadystatechange = () => {
+            if (sx.readyState !== XMLHttpRequest.DONE || sx.status !== 200) return
+            try { eventSummary = JSON.parse(sx.responseText) } catch (e) { }
+        }
+        sx.send()
+    }
+
+    function clearHistory() {
+        const xhr = new XMLHttpRequest()
+        xhr.open("POST", daemonUrl + "/events/clear")
+        xhr.setRequestHeader("Content-Type", "application/json")
+        xhr.timeout = 5000
+        xhr.onreadystatechange = () => {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            if (xhr.status !== 200) showError("No se pudo borrar el historial")
+            historyDevice = ""
+            fetchEvents()
+            fetchDevices()
+        }
+        xhr.send("{}")
+    }
+
+    // "14:02" today, "ayer 14:02", otherwise "12/11 14:02".
+    function formatTime(ts) {
+        const d = new Date(ts * 1000), now = new Date()
+        const pad = n => (n < 10 ? "0" : "") + n
+        const hm = pad(d.getHours()) + ":" + pad(d.getMinutes())
+        const day = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+        const diff = Math.round((day - new Date(d.getFullYear(), d.getMonth(), d.getDate()))
+                                / 86400000)
+        if (diff === 0) return hm
+        if (diff === 1) return "ayer " + hm
+        return pad(d.getDate()) + "/" + pad(d.getMonth() + 1) + " " + hm
+    }
+
+    function fullTime(ts) {
+        const d = new Date(ts * 1000)
+        const pad = n => (n < 10 ? "0" : "") + n
+        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+             + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds())
+    }
+
+    // Same fixed-column block as the device fact sheet, so the two paste alike.
+    function eventDetail(ev) {
+        const rows = [
+            ["NIVEL",  ev.level.toUpperCase()],
+            ["TIPO",   ev.kind],
+            ["EVENTO", ev.message],
+            ["CUANDO", fullTime(ev.ts)],
+        ]
+        if (ev.count > 1) {
+            rows.push(["ÚLTIMO", fullTime(ev.last_ts)])
+            rows.push(["VECES",  String(ev.count)])
+        }
+        if (ev.device_id) rows.push(["ID", ev.device_id])
+        let out = rows.map(r => r[0].padEnd(7) + r[1]).join("\n")
+        if (ev.detail) out += "\n\n" + ev.detail
+        return out
+    }
+
+    // What COPIAR puts on the clipboard: the rows on screen, oldest last, one
+    // line each — enough to paste into an issue or a support thread.
+    function historyReport() {
+        const head = "SmartThings · historial"
+            + (historyDevice !== "" ? " · " + historyDeviceName : "")
+            + (historyOnlyIssues ? " · solo fallos" : "")
+            + " · " + fullTime(Date.now() / 1000)
+        return head + "\n" + filteredEvents.map(ev =>
+            fullTime(ev.last_ts) + "  " + ev.level.toUpperCase().padEnd(5) + "  "
+            + (ev.device_name || "Daemon") + " — " + ev.message
+            + (ev.count > 1 ? "  (×" + ev.count + " desde " + fullTime(ev.ts) + ")" : "")
+            + (ev.detail ? "\n      " + ev.detail : "")
+        ).join("\n")
     }
 
     function errorDetail(xhr) {

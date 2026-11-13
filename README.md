@@ -28,6 +28,12 @@ and a QML plasmoid renders the controls.
 - **Reorder the grid by hand** (⇅ in the header): cards rearrange live under the
   pointer and the order is saved by the daemon, so it survives restarts and
   plasmashell reloads. See [Manual order](#manual-order).
+- **History for diagnosis** (Historial tab): the daemon records state changes,
+  every command and its outcome, and every failed cloud read, with failures
+  highlighted. A repeat of the same failure folds into one row (`×37 · desde
+  14:44`), a chip row ranks the devices with the most problems in the last 24 h,
+  and a card with recent issues shows a `!N` badge that jumps straight to its
+  history. See [History](#history).
 - Devices are classified by SmartThings **component categories** (the same
   signal the official app uses), so a TV or AC — which also expose a `switch` —
   never gets misfiled as a light.
@@ -217,6 +223,9 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 | POST | `/devices/{id}/setpoint` | `{"value": 22}` (AC) |
 | POST | `/devices/{id}/lock` · `/unlock` | Door lock |
 | POST | `/refresh` | Force a cloud sweep now; returns when it lands |
+| GET  | `/events` | History, newest first (`?device=&level=warn&since=&limit=`) |
+| GET  | `/events/summary` | Warnings/errors per device (`?hours=24`) |
+| POST | `/events/clear` | Wipe the history |
 | GET  | `/aliases` | Local names, keyed by device id / `{id}_{outlet}` |
 | POST | `/alias` | Local rename `{"key","name"}` — empty name restores the original |
 | POST | `/channel_name` | Legacy channel rename `{"device_id","outlet","name"}` |
@@ -288,6 +297,36 @@ keys as the aliases), not in the plasmoid config: keeping it next to the daemon
 means it survives plasmashell reloads and reinstalls, and any future client can
 read the same arrangement. Devices missing from the list — a newly paired one,
 say — sort after the ordered ones by room.
+
+### History
+
+The daemon keeps an event log in `~/.local/state/smartthings-widget/events.jsonl`
+(state, not config: deleting it costs nothing but history). What goes in:
+
+| Kind | Examples | Level |
+|---|---|---|
+| `state` | on/off, mode, setpoint, TV input, washer cycle, lock, motion | info |
+| `connectivity` | a device going offline / coming back | warn / info |
+| `command` | every command sent from the widget, and whether it worked | info / error |
+| `command` | **accepted but no effect**: SmartThings said ACCEPTED, yet 6 s later the device still is not in the requested state | warn |
+| `cloud` | a per-device `/status` or `/health` read that failed (`HTTP 500 UnexpectedError`) | error |
+| `daemon` | start, a whole sweep failing (DNS, token) | info / error |
+
+Readings that drift on their own — temperature, humidity, volume, brightness —
+are left out; they would bury the events that matter.
+
+The same failure within an hour is **folded** into one event with a count and a
+first/last time, instead of one row every 20 s sweep. Request ids are stripped
+for that comparison (they differ on every call) but kept in the detail panel —
+click a row to see it, with the raw cloud error, and COPIAR to paste it.
+
+The "accepted but no effect" warning exists because SmartThings answers
+ACCEPTED to commands a device then ignores — a washer with Smart Control off,
+a TV in standby. Without it, that failure is indistinguishable from success.
+
+A failed `/status` read now **keeps the last known state** (and marks the device
+`stale`) instead of emptying it; before, a TV that was on rendered as off until
+the next sweep happened to succeed.
 
 ## Useful commands
 
