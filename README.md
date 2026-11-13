@@ -49,7 +49,12 @@ and a QML plasmoid renders the controls.
   range), mode (auto/cool/dry/fan/heat), plus current temperature & humidity.
 - **TVs**: on/off, volume slider, play/pause/stop, current input.
 - **Speakers**: play/pause/stop, volume, and what's currently playing.
-- **Appliances** (washer/dryer…): on/off and machine state.
+- **Appliances** (washer/dryer…): status and current phase, **when it ends**
+  (as a clock time), a progress bar split into the cycle's phases, the program
+  settings (temperature · spin · rinses), child lock, and start/pause. When
+  **Smart Control** is off on the machine, the controls are replaced by a line
+  saying so — see [Appliances and Smart Control](#appliances-and-smart-control).
+  A finished cycle raises a desktop notification.
 - **Sensors**: read-only temperature, humidity, motion/contact, battery — with a
   desktop notification (`notify-send`) when a motion sensor becomes active.
 - **The wheel always scrolls the list**: a brightness or volume slider under the
@@ -222,6 +227,8 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 | POST | `/devices/{id}/mode` | `{"value": "cool"}` (AC) |
 | POST | `/devices/{id}/setpoint` | `{"value": 22}` (AC) |
 | POST | `/devices/{id}/lock` · `/unlock` | Door lock |
+| POST | `/devices/{id}/machine` | `{"value": "run"}` / `"pause"` / `"stop"` (appliance) — `409` if Smart Control is off |
+| GET  | `/devices/{id}/raw` | The cloud's raw status, for diagnosing fields the widget doesn't show |
 | POST | `/refresh` | Force a cloud sweep now; returns when it lands |
 | GET  | `/events` | History, newest first (`?device=&level=warn&since=&limit=`) |
 | GET  | `/events/summary` | Warnings/errors per device (`?hours=24`) |
@@ -297,6 +304,24 @@ keys as the aliases), not in the plasmoid config: keeping it next to the daemon
 means it survives plasmashell reloads and reinstalls, and any future client can
 read the same arrangement. Devices missing from the list — a newly paired one,
 say — sort after the ordered ones by room.
+
+### Appliances and Smart Control
+
+Samsung appliances only accept remote commands while **Smart Control** is
+enabled *on the machine* (a button on its panel; it switches itself off after a
+cycle or when the door opens). The cloud reports it as
+`remoteControlStatus.remoteControlEnabled`. With it off, commands are refused or
+— worse — answered `ACCEPTED` and ignored, which is why the washer toggle used
+to "do nothing".
+
+So the daemon checks it first: a command to an appliance with Smart Control off
+returns `409` with that explanation, without calling the cloud, and the card
+shows it instead of offering a switch that cannot work. Nothing the widget sends
+can turn Smart Control on; that is deliberate on Samsung's side.
+
+The program **name** is not shown: the cloud only reports an opaque course code
+(`Table_02_Course_21`) with no name table, so the card shows the program's
+settings instead.
 
 ### History
 

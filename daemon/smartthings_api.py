@@ -460,6 +460,14 @@ class SmartThingsClient:
             return False
         return self._command(device_id, "main", "mediaPlayback", command)
 
+    # ── Appliances (washer / dryer / dishwasher) ─────────────────────────────
+    def set_machine_state(self, device_id: str, state: str) -> bool:
+        if state not in ("run", "pause", "stop"):
+            return False
+        kind = (self._devices.get(device_id, {}).get("state") or {}).get("kind", "washer")
+        return self._command(device_id, "main", f"{kind}OperatingState",
+                             "setMachineState", [state])
+
     # ── Climate (air conditioner) ────────────────────────────────────────────
     def set_ac_mode(self, device_id: str, mode: str) -> bool:
         return self._command(device_id, "main", "airConditionerMode",
@@ -531,6 +539,72 @@ def _identity(dev: dict) -> dict:
     }
 
 
+def _iso_to_epoch(value) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _appliance_state(status: dict, battery) -> dict:
+    """Washer / dryer / dishwasher.
+
+    Samsung appliances report each thing twice: a standard capability
+    (`washerOperatingState`: machineState, completionTime) and a richer
+    `samsungce.*` one (progress, phases, remaining time). The standard one is
+    preferred where both exist, since it is what other brands implement too.
+
+    `remote` is the one that matters for control: with Smart Control off on
+    the machine itself, the cloud refuses — or silently ignores — every
+    command, so the widget has to know before it offers a button."""
+    main = "main"
+
+    def cv(cap, attr):
+        return _cap_value(status, main, cap, attr)
+
+    kind = next((k for k in ("washer", "dryer", "dishwasher")
+                 if cv(f"{k}OperatingState", "machineState") is not None
+                 or cv(f"samsungce.{k}OperatingState", "operatingState") is not None),
+                "washer")
+    std = f"{kind}OperatingState"
+    sce = f"samsungce.{kind}OperatingState"
+
+    remote = cv("remoteControlStatus", "remoteControlEnabled")
+    kids   = cv("samsungce.kidsLock", "lockState")
+    phases = cv(sce, "scheduledPhases") or []
+
+    def to_int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "on":            cv("switch", "switch") == "on",
+        "kind":          kind,
+        "machine_state": cv(std, "machineState") or "",
+        "job_state":     (cv(std, f"{kind}JobState") or cv(sce, f"{kind}JobState") or ""),
+        "operating":     cv(sce, "operatingState") or "",
+        # The attribute is the string "true"/"false"; None when not reported.
+        "remote":        (str(remote).lower() == "true") if remote is not None else None,
+        "progress":      to_int(cv(sce, "progress")),
+        "remaining_min": to_int(cv(sce, "remainingTime")),
+        "completion":    _iso_to_epoch(cv(std, "completionTime")),
+        "phases":        [{"name": p.get("phaseName", ""), "min": to_int(p.get("timeInMin")) or 0}
+                          for p in phases if isinstance(p, dict)],
+        "water_temp":    cv("custom.washerWaterTemperature", "washerWaterTemperature") or "",
+        "spin":          cv("custom.washerSpinLevel", "washerSpinLevel") or "",
+        "rinses":        cv("custom.washerRinseCycles", "washerRinseCycles") or "",
+        "dry_level":     cv("custom.dryerDryLevel", "dryerDryLevel") or "",
+        "kids_lock":     (kids == "locked") if kids is not None else None,
+        "delay_min":     to_int(cv(f"samsungce.{kind}DelayEnd", "remainingTime")),
+        "battery":       battery,
+    }
+
+
 def _cap_value(status: dict, component: str, capability: str, attribute: str):
     try:
         return status["components"][component][capability][attribute]["value"]
@@ -595,17 +669,7 @@ def _extract_state(dev: dict, status: dict) -> dict:
         }
 
     if dtype == "appliance":
-        mstate = (_cap_value(status, main, "washerOperatingState", "machineState")
-                  or _cap_value(status, main, "dryerOperatingState", "machineState")
-                  or _cap_value(status, main, "dishwasherOperatingState", "machineState") or "")
-        jstate = (_cap_value(status, main, "washerOperatingState", "washerJobState")
-                  or _cap_value(status, main, "dryerOperatingState", "dryerJobState") or "")
-        return {
-            "on":            _cap_value(status, main, "switch", "switch") == "on",
-            "machine_state": mstate,
-            "job_state":     jstate,
-            "battery":       battery,
-        }
+        return _appliance_state(status, battery)
 
     if dtype == "sensor":
         temp   = _cap_value(status, main, "temperatureMeasurement", "temperature")

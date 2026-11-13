@@ -50,6 +50,8 @@ Item {
     // appliance
     required property string machineState
     required property string jobState
+    // Full appliance state from the daemon, as JSON ("" for anything else).
+    required property string appliance
     // Warnings + errors the daemon logged for this device in the last 24 h.
     required property int    issues
 
@@ -67,6 +69,7 @@ Item {
     signal playbackRequested(string id, string command)
     signal acModeSet(string id, string mode)
     signal setpointSet(string id, int value)
+    signal machineRequested(string id, string state)   // run | pause
     // A wheel turn over a slider scrolls the list instead of moving the slider.
     signal scrollRequested(real delta)
     signal copyRequested(string text)
@@ -126,6 +129,72 @@ Item {
     readonly property bool lockIsUnlocked: lockLocked === 0
 
     readonly property var acModeList: acModes.length ? acModes.split(",") : []
+
+    // ── Appliance ─────────────────────────────────────────────────────────────
+    readonly property var appl: {
+        if (appliance === "") return ({})
+        try { return JSON.parse(appliance) } catch (e) { return ({}) }
+    }
+    // false only when the machine says so; unknown (null) does not block.
+    readonly property bool applRemoteOff: appl.remote === false
+    readonly property bool applRunning:   appl.operating === "running" || appl.machine_state === "run"
+    readonly property bool applPaused:    appl.operating === "paused"  || appl.machine_state === "pause"
+    readonly property bool applActive:    applRunning || applPaused
+    readonly property var  applPhases:    appl.phases || []
+    readonly property int  applTotalMin:  applPhases.reduce((a, p) => a + (p.min || 0), 0)
+
+    readonly property var jobLabels: ({
+        wash: "LAVADO", rinse: "ENJUAGUE", spin: "CENTRIFUGADO", drying: "SECADO",
+        weightSensing: "PESANDO", preWash: "PRELAVADO", cooling: "ENFRIANDO",
+        wrinklePrevent: "ANTIARRUGAS", finish: "TERMINADO", airWash: "LAVADO AIRE",
+        delayWash: "PROGRAMADO",
+    })
+
+    readonly property string applStatus: {
+        if (!deviceOnline) return "SIN RED"
+        if (applRunning) {
+            const job = jobLabels[appl.job_state] || ""
+            return "EN MARCHA" + (job !== "" ? " · " + job : "")
+        }
+        if (applPaused) return "EN PAUSA"
+        if ((appl.delay_min || 0) > 0) return "PROGRAMADA"
+        return isOn ? "LISTA" : "APAGADA"
+    }
+
+    // When it ends, as a clock time: "faltan 38 min" is stale a minute later,
+    // "termina 17:42" is not.
+    readonly property string applEnds: {
+        if (!applActive) return ""
+        let t = appl.completion || 0
+        if (!(t > 0) && appl.remaining_min != null) t = Date.now() / 1000 + appl.remaining_min * 60
+        if (!(t > 0)) return ""
+        const d = new Date(t * 1000)
+        const pad = n => (n < 10 ? "0" : "") + n
+        return "TERMINA " + pad(d.getHours()) + ":" + pad(d.getMinutes())
+    }
+
+    function fmtMinutes(m) {
+        if (m == null) return ""
+        return m >= 60 ? Math.floor(m / 60) + " H " + (m % 60 < 10 ? "0" : "") + (m % 60)
+                       : m + " MIN"
+    }
+
+    // Program settings, in the machine's own terms. The program *name* is not
+    // available — the cloud reports an opaque course code with no name table.
+    readonly property string applProgram: {
+        const out = []
+        const t = appl.water_temp || ""
+        if (t !== "" && t !== "none") out.push(t === "cold" ? "FRÍA" : t + "°")
+        const sp = appl.spin || ""
+        if (sp !== "" && sp !== "none")
+            out.push(sp === "noSpin" ? "SIN CENTRIF." : sp === "rinseHold" ? "RETENER AGUA"
+                                                                         : sp + " RPM")
+        const r = appl.rinses || ""
+        if (r !== "" && r !== "0") out.push(r + (r === "1" ? " ENJUAGUE" : " ENJUAGUES"))
+        const dl = appl.dry_level || ""
+        if (dl !== "" && dl !== "none") out.push("SECADO " + (dl === "cupboard" ? "ARMARIO" : dl + " MIN"))
+        return out.join(" · ")
+    }
     readonly property bool playing:    playback === "playing"
 
     // A battery at 100 % is noise; one that is running out is worth a line.
@@ -147,6 +216,7 @@ Item {
     readonly property string lockIcon:     Qt.resolvedUrl("../icons/lock.svg")
     readonly property string lockOpenIcon: Qt.resolvedUrl("../icons/lock-open.svg")
     readonly property string socketIcon:   Qt.resolvedUrl("../icons/socket.svg")
+    readonly property string washerIcon:   Qt.resolvedUrl("../icons/washer.svg")
 
     // One icon rule for both layouts — the grid used to draw a light bulb for
     // everything, including plugs and strip channels.
@@ -159,7 +229,7 @@ Item {
         if (isTv)        return "video-television"
         if (isAc)        return "temperature-cold"
         if (isSpeaker)   return "audio-speakers-symbolic"
-        if (isAppliance) return "washing-machine-symbolic"
+        if (isAppliance) return washerIcon
         if (outlet >= 0) return socketIcon      // one channel of a power strip
         return bulbIcon
     }
@@ -722,7 +792,7 @@ Item {
                 QQC2.Switch {
                     visible: card.hasOnOff && !card.editingName
                     checked: card.isOn
-                    enabled: card.deviceOnline
+                    enabled: card.deviceOnline && !card.applRemoteOff
                     onToggled: card.toggleRequested(card.deviceId,
                                    card.outlet >= 0 ? card.outlet : null)
                 }
@@ -1086,21 +1156,158 @@ Item {
                 }
             }
 
-            // ── Appliance state ───────────────────────────────────────────────
-            RowLayout {
+            // ── Appliance ─────────────────────────────────────────────────────
+            ColumnLayout {
                 visible: card.isAppliance
                 Layout.fillWidth: true
-                spacing: 8
-                Text {
-                    text: (card.machineState !== "" ? card.machineState : "—").toUpperCase()
-                    color: card.machineState === "run" ? card.stateColor : card.nameColor
-                    font.pixelSize: card.fontS; font.bold: true; font.family: "monospace"
+                spacing: 4
+
+                // Status + when it ends.
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Text {
+                        text: card.applStatus
+                        color: card.applRunning ? card.stateColor : card.nameColor
+                        font.pixelSize: card.fontS; font.bold: true; font.family: "monospace"
+                    }
+                    Item { Layout.fillWidth: true }
+                    Text {
+                        visible: card.applEnds !== ""
+                        text: card.applEnds
+                        color: card.nameColor
+                        font.pixelSize: card.fontXS; font.bold: true; font.family: "monospace"
+                    }
                 }
-                Text {
-                    visible: card.jobState !== "" && card.jobState !== "none"
-                    text: card.jobState.toUpperCase()
-                    color: card.secondColor
-                    font.pixelSize: card.fontXS; font.family: "monospace"
+
+                // Progress across the cycle's phases, each as wide as its share
+                // of the time — so "enjuague" visibly comes after a long wash.
+                Item {
+                    visible: card.applActive && card.applPhases.length > 0 && card.applTotalMin > 0
+                    Layout.fillWidth: true
+                    implicitHeight: phaseLabels.implicitHeight + 8
+
+                    Row {
+                        id: phaseBar
+                        anchors { left: parent.left; right: parent.right; top: parent.top }
+                        height: 5
+                        spacing: 2
+                        Repeater {
+                            model: card.applPhases
+                            Rectangle {
+                                required property var modelData
+                                required property int index
+                                width: Math.max(4, (phaseBar.width - phaseBar.spacing
+                                                    * (card.applPhases.length - 1))
+                                                   * modelData.min / card.applTotalMin)
+                                height: phaseBar.height
+                                color: "#3C3C3C"
+                            }
+                        }
+                    }
+                    // Fill on top of the track, by overall progress.
+                    Rectangle {
+                        anchors { left: parent.left; top: parent.top }
+                        height: 5
+                        width: parent.width * Math.max(0, Math.min(100, card.appl.progress || 0)) / 100
+                        color: card.applRunning ? card.stateColor : card.secondColor
+                    }
+                    Row {
+                        id: phaseLabels
+                        anchors { left: parent.left; right: parent.right; top: phaseBar.bottom; topMargin: 3 }
+                        spacing: 2
+                        Repeater {
+                            model: card.applPhases
+                            Text {
+                                required property var modelData
+                                width: Math.max(4, (phaseLabels.width - phaseLabels.spacing
+                                                    * (card.applPhases.length - 1))
+                                                   * modelData.min / card.applTotalMin)
+                                text: (card.jobLabels[modelData.name] || modelData.name.toUpperCase())
+                                elide: Text.ElideRight
+                                font.pixelSize: card.fontXS; font.family: "monospace"
+                                font.bold: modelData.name === card.appl.job_state
+                                color: modelData.name === card.appl.job_state ? card.nameColor
+                                                                               : card.secondColor
+                            }
+                        }
+                    }
+                }
+
+                // Program settings + child lock.
+                RowLayout {
+                    visible: card.applProgram !== "" || card.appl.kids_lock === true
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Text {
+                        Layout.fillWidth: true
+                        visible: card.applProgram !== ""
+                        text: card.applProgram
+                        elide: Text.ElideRight
+                        color: card.secondColor
+                        font.pixelSize: card.fontXS; font.family: "monospace"
+                    }
+                    Text {
+                        visible: card.appl.kids_lock === true
+                        text: "BLOQ. INFANTIL"
+                        color: card.secondColor
+                        font.pixelSize: card.fontXS; font.bold: true; font.family: "monospace"
+                    }
+                    Text {
+                        visible: !card.applActive && card.applTotalMin > 0 && card.isOn
+                        text: card.fmtMinutes(card.applTotalMin)
+                        color: card.secondColor
+                        font.pixelSize: card.fontXS; font.family: "monospace"
+                    }
+                }
+
+                // Controls — or why there are none. Smart Control is a button
+                // on the machine; nothing the widget sends can turn it on.
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: card.deviceOnline
+                    spacing: 5
+
+                    Rectangle {
+                        visible: !card.applRemoteOff && card.isOn
+                        implicitWidth:  runRow.implicitWidth + Kirigami.Units.gridUnit * 0.8
+                        implicitHeight: Kirigami.Units.gridUnit * 1.25
+                        color: "transparent"
+                        border.color: card.structColor
+                        border.width: 1
+                        Row {
+                            id: runRow
+                            anchors.centerIn: parent
+                            spacing: 4
+                            Kirigami.Icon {
+                                width: Math.round(Kirigami.Units.iconSizes.small * 0.8); height: width
+                                isMask: true
+                                source: card.applRunning ? "media-playback-pause" : "media-playback-start"
+                                color: card.structColor
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: card.applRunning ? "PAUSAR" : (card.applPaused ? "REANUDAR" : "INICIAR")
+                                font.pixelSize: card.fontXS; font.bold: true; font.family: "monospace"
+                                color: card.structColor
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: card.machineRequested(card.deviceId,
+                                                             card.applRunning ? "pause" : "run")
+                        }
+                    }
+
+                    Text {
+                        visible: card.applRemoteOff
+                        Layout.fillWidth: true
+                        text: "SMART CONTROL APAGADO · actívalo en la máquina para controlarla desde aquí"
+                        wrapMode: Text.Wrap
+                        color: card.secondColor
+                        font.pixelSize: card.fontXS; font.family: "monospace"
+                    }
                 }
             }
         }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <!-- Front-loading washer: outlined body, a control strip with two knobs, and
+       the porthole as a ring. Same outline weight as socket.svg. The theme has
+       no washing-machine icon, which left appliances drawn as a document. -->
+  <path fill-rule="evenodd" d="M6 2.4h12A1.6 1.6 0 0 1 19.6 4v16a1.6 1.6 0 0 1-1.6 1.6H6A1.6 1.6 0 0 1 4.4 20V4A1.6 1.6 0 0 1 6 2.4ZM6 4v16h12V4H6Z"/>
+  <path d="M6 7.1h12v1.4H6z"/>
+  <circle cx="8" cy="5.5" r="0.9"/>
+  <circle cx="10.6" cy="5.5" r="0.9"/>
+  <path fill-rule="evenodd" d="M12 9.6a4.6 4.6 0 1 1 0 9.2 4.6 4.6 0 0 1 0-9.2Zm0 1.6a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/>
+</svg>

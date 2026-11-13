@@ -463,6 +463,7 @@ PlasmoidItem {
                                     onPlaybackRequested:  (id, cmd) => mediaCmd(id, cmd)
                                     onAcModeSet:          (id, mode) => setAcMode(id, mode)
                                     onSetpointSet:        (id, val) => setSetpoint(id, val)
+                                    onMachineRequested:   (id, st) => setMachine(id, st)
                                     onScrollRequested:    (delta) => scrollView.scrollBy(delta)
                                     onCopyRequested:      (text) => copyToClipboard(text, "COPIADO AL PORTAPAPELES")
                                     onInfoRequested:      (title, body) => infoPanel.show(title, body)
@@ -1340,6 +1341,7 @@ PlasmoidItem {
                         acHumidity:   "",
                         machineState: "",
                         jobState:     "",
+                        appliance:    "",
                         issues:       d.issues ?? 0,
                     }
                     if (idx >= 0) deviceModel.set(idx, flat)
@@ -1406,6 +1408,10 @@ PlasmoidItem {
             // appliance
             machineState: s.machine_state ?? "",
             jobState:     s.job_state     ?? "",
+            // The whole appliance state as JSON: a ListModel turns nested
+            // objects into sub-models, and ten more flat roles for one device
+            // type would be noise on every other card.
+            appliance:    d.type === "appliance" ? JSON.stringify(s) : "",
             issues:       d.issues ?? 0,
         }
     }
@@ -1589,6 +1595,10 @@ PlasmoidItem {
         const idx = findIndex(id)
         if (idx >= 0) deviceModel.setProperty(idx, "setpoint", val)
         postAction(id, "setpoint", JSON.stringify({value: val}), id)
+    }
+
+    function setMachine(id, state) {
+        postAction(id, "machine", JSON.stringify({value: state}), id)
     }
 
     // Local-only rename: stored by the daemon, never pushed to SmartThings.

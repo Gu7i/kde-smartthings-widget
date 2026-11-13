@@ -19,6 +19,7 @@ Endpoints:
   POST /auth/start         → begin OAuth flow (returns authorization URL)
   GET  /callback           → OAuth redirect target
   GET  /status             → daemon health
+  GET  /devices/{id}/raw   → the cloud's raw status (diagnosis)
   GET  /events             → history, newest first (?device=&level=&since=&limit=)
   GET  /events/summary     → warnings/errors per device (?hours=24)
   POST /events/clear       → wipe the history
@@ -207,9 +208,15 @@ def _describe_change(key: str, old, new) -> tuple[str, str] | None:
     if key == "input":
         return "info", f"Entrada {old or '—'} → {new or '—'}"
     if key == "machine_state":
-        return "info", f"Máquina {old or '—'} → {new or '—'}"
+        return "info", f"Máquina {MACHINE_LABEL.get(old, old or '—')} → {MACHINE_LABEL.get(new, new or '—')}"
     if key == "job_state":
-        return "info", f"Ciclo {old or '—'} → {new or '—'}"
+        if new in (None, "", "none"):
+            return None                    # the end of a cycle has its own event
+        return "info", f"Fase: {JOB_LABEL.get(new, new)}"
+    if key == "remote":
+        if new is None or old is None:
+            return None
+        return ("info", "Smart Control activado") if new else ("info", "Smart Control desactivado")
     if key == "battery":
         # Only the crossing into "low" is news; every 1 % step is not.
         if isinstance(new, (int, float)) and new <= 20 and \
@@ -251,8 +258,11 @@ def _diff_and_log(old: dict, new: dict) -> None:
             continue
 
         ps, ns = prev.get("state") or {}, dev.get("state") or {}
+        if dev.get("type") == "appliance":
+            _appliance_events(did, name, ps, ns)
+
         for key in ("on", "locked", "motion", "mode", "setpoint", "input",
-                    "machine_state", "job_state", "battery"):
+                    "machine_state", "job_state", "battery", "remote"):
             if key not in ns or ps.get(key) == ns.get(key):
                 continue
             if key not in ps:
@@ -274,6 +284,35 @@ def _diff_and_log(old: dict, new: dict) -> None:
             _events.add("warn", "state", "Ya no aparece en SmartThings",
                         device_id=did,
                         device_name=aliases.get(did) or dev.get("name", did))
+
+
+MACHINE_LABEL = {"run": "en marcha", "pause": "en pausa", "stop": "detenida"}
+
+JOB_LABEL = {
+    "wash": "lavado", "rinse": "enjuague", "spin": "centrifugado",
+    "drying": "secado", "weightSensing": "pesando", "preWash": "prelavado",
+    "cooling": "enfriando", "wrinklePrevent": "antiarrugas", "finish": "terminado",
+    "airWash": "lavado con aire", "delayWash": "programado",
+}
+
+
+def _appliance_events(did: str, name: str, ps: dict, ns: dict) -> None:
+    """The one appliance event worth interrupting someone for: it finished."""
+    was = ps.get("machine_state") == "run" or ps.get("operating") == "running"
+    now = ns.get("machine_state") == "run" or ns.get("operating") == "running"
+    if not was or now or ns.get("machine_state") == "pause" or ns.get("operating") == "paused":
+        return
+    # Ran to the end, or was cut short? Near-zero remaining time or a "finish"
+    # phase says the former; anything else is a stop mid-cycle.
+    rem = ps.get("remaining_min")
+    finished = ns.get("job_state") == "finish" or (rem is not None and rem <= 5)
+    if finished:
+        _events.add("info", "state", "Ciclo terminado", device_id=did, device_name=name)
+        _notify(f"{name}: ciclo terminado", "Ya puedes sacar la ropa.")
+    else:
+        _events.add("warn", "state", "Ciclo detenido antes de terminar",
+                    device_id=did, device_name=name,
+                    detail=f"Quedaban {rem} min" if rem is not None else "")
 
 
 def _on_device_error(did: str, name: str, op: str, exc: Exception) -> None:
@@ -301,11 +340,14 @@ def _command_label(action: str, patch: dict, value) -> str:
     if action == "brightness": return f"Brillo {value}%"
     if action == "volume":     return f"Volumen {value}"
     if action == "mode":       return f"Modo {value}"
+    if action == "machine":
+        return {"run": "Iniciar ciclo", "pause": "Pausar ciclo",
+                "stop": "Detener ciclo"}.get(value, f"Máquina {value}")
     if action == "setpoint":   return f"Consigna {value}°"
     return _ACTION_LABEL.get(action, action)
 
 
-_VERIFY_KEYS = {"on", "channels", "locked", "mode", "setpoint"}
+_VERIFY_KEYS = {"on", "channels", "locked", "mode", "setpoint", "machine_state"}
 
 
 def _verify_command(did: str, label: str, patch: dict) -> None:
@@ -539,6 +581,15 @@ class Handler(BaseHTTPRequestHandler):
                 names[int(idx)] = name
             self._send_json(200, out)
 
+        elif path.startswith("/devices/") and path.endswith("/raw"):
+            # The cloud's full status, untouched: what to look at when a device
+            # reports something the widget does not show yet.
+            did = path[len("/devices/"):-len("/raw")]
+            try:
+                self._send_json(200, _client._get(f"/v1/devices/{did}/status"))
+            except Exception as e:
+                self._send_json(502, {"error": str(e)})
+
         elif path.startswith("/devices/"):
             did = path[len("/devices/"):]
             dev = _client.devices.get(did)
@@ -654,6 +705,22 @@ class Handler(BaseHTTPRequestHandler):
             outlet = body.get("outlet")
             patch: dict = {}
 
+            # An appliance with Smart Control off refuses every command — and
+            # sometimes still answers ACCEPTED. Say so plainly instead of
+            # sending something we know will not happen.
+            if dev.get("type") == "appliance" and \
+               (dev.get("state") or {}).get("remote") is False and \
+               action in ("on", "off", "toggle", "machine"):
+                msg = "Smart Control está apagado en el aparato"
+                what = (_command_label("machine", {}, body.get("value"))
+                        if action == "machine" else "Encender/apagar")
+                _events.add("warn", "command", f"{what} · bloqueado · {msg}",
+                            device_id=did,
+                            device_name=_load_aliases().get(did) or dev.get("name", did),
+                            key="cmd:remote-off", window=300)
+                self._send_json(409, {"ok": False, "error": msg})
+                return
+
             # Work out the optimistic patch + the cloud call up front, so we can
             # update the cache BEFORE the (~1 s) cloud round-trip. That way a
             # widget poll landing during the round-trip already sees the new
@@ -694,6 +761,13 @@ class Handler(BaseHTTPRequestHandler):
                     patch = {"playback": {"play": "playing", "pause": "paused",
                                           "stop": "stopped"}[action]}
                     run = lambda: _client.media_command(did, action)
+                elif action == "machine":
+                    v = str(body.get("value", ""))
+                    if v not in ("run", "pause", "stop"):
+                        self._send_json(400, {"error": "value must be run|pause|stop"})
+                        return
+                    patch = {"machine_state": v}
+                    run = lambda: _client.set_machine_state(did, v)
                 elif action == "mode":
                     v = str(body.get("value", ""))
                     patch = {"mode": v}
