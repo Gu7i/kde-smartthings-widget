@@ -64,8 +64,19 @@ and a QML plasmoid renders the controls.
   **Smart Control** is off on the machine, the controls are replaced by a line
   saying so — see [Appliances and Smart Control](#appliances-and-smart-control).
   A finished cycle raises a desktop notification.
-- **Sensors**: read-only temperature, humidity, motion/contact, battery — with a
-  desktop notification (`notify-send`) when a motion sensor becomes active.
+- **Sensors**: square tiles led by the reading itself — the temperature in
+  large type where other tiles have an icon, then the name on up to two lines
+  ("temperatura / Igor y Cindy": the tail is what tells them apart), then
+  humidity or ACTIVO / EN REPOSO and a low battery. A desktop notification
+  (`notify-send`) fires when a motion sensor becomes active.
+- **Two columns of cards**: an AC, TV or speaker in a full-width row left most
+  of the row empty, so once the popup is at least two card widths wide
+  (`cardMinWidth`, 13 grid units each — the default popup qualifies) cards go
+  side by side. It is a masonry, not a row flow: each card drops into the
+  shorter column, so a switched-off TV next to one showing its controls does not
+  leave a hole the height of the difference. A run of tiles, and a TV with its
+  remote open, take the full width below both columns. Order is still the
+  manual order, read left column first where heights allow.
 - **The wheel always scrolls the list**: a brightness or volume slider under the
   pointer hands the turn back to the list instead of swallowing it, so scrolling
   past a volume bar never moves it by accident.

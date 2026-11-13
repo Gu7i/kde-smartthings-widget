@@ -41,6 +41,9 @@ PlasmoidItem {
     // Tiles are 4:3 (see DeviceCard), so the minimum width also sets the height
     // budget: icon plus a name plus one secondary line.
     readonly property int tileMinWidth: Kirigami.Units.gridUnit * 5
+    // Narrowest a control card (AC, TV, appliance) can be and still fit its
+    // widest row: the AC's five mode chips.
+    readonly property int cardMinWidth: Kirigami.Units.gridUnit * 13
 
     property int activeTab: 0
     property string searchText: ""
@@ -432,22 +435,77 @@ PlasmoidItem {
                         width: scrollView.availableWidth
                         spacing: 4
 
-                        Flow {
+                        // Two-column masonry rather than a Flow: a Flow lines
+                        // cards up in rows, so a switched-off TV next to an
+                        // open one left a hole the height of the difference.
+                        // Each card goes to whichever column is shorter; a run
+                        // of tiles, or a card that needs the full width (open
+                        // remote, narrow popup), starts below both columns.
+                        // Order is still the model order, read off `children`,
+                        // which the Repeater restacks on every move.
+                        Item {
                             id: deviceFlow
                             Layout.fillWidth: true
-                            spacing: 4
+                            implicitHeight: contentHeight
+                            readonly property int spacing: 4
+                            property real contentHeight: 0
+
+                            function relayout() { Qt.callLater(doLayout) }
+                            function doLayout() {
+                                const sp = spacing
+                                let col = [0, 0]          // left / right bottoms
+                                let tileX = -1, tileY = 0, tileRow = 0
+                                const below = () => Math.max(col[0], col[1])
+                                for (let i = 0; i < children.length; ++i) {
+                                    const c = children[i]
+                                    if (c.modelKey === undefined || !c.visible)
+                                        continue
+                                    if (c.tile) {
+                                        if (tileX < 0 || tileX + c.width > width + 1) {
+                                            // New row of tiles.
+                                            tileY = tileX < 0 ? below() : tileY + tileRow + sp
+                                            tileX = 0; tileRow = 0
+                                        }
+                                        c.x = tileX; c.y = tileY
+                                        tileX += c.width + sp
+                                        tileRow = Math.max(tileRow, c.height)
+                                        col[0] = col[1] = tileY + tileRow + sp
+                                        continue
+                                    }
+                                    tileX = -1
+                                    if (c.width < width - 1) {
+                                        const k = col[1] < col[0] ? 1 : 0
+                                        c.x = k ? width - c.width : 0
+                                        c.y = col[k]
+                                        col[k] += c.height + sp
+                                    } else {
+                                        c.x = 0; c.y = below()
+                                        col[0] = col[1] = c.y + c.height + sp
+                                    }
+                                }
+                                contentHeight = Math.max(0, below() - sp)
+                            }
+                            onWidthChanged: relayout()
 
                             // Columns come from a minimum tile size, so tiles stay
                             // legible when the widget is resized or on HiDPI.
                             readonly property int tileColumns:
                                 Math.max(2, Math.floor((width + spacing) / (root.tileMinWidth + spacing)))
+                            // Full-width rows left most of each AC or TV card
+                            // empty: the controls sit at the left edge and the
+                            // readings at the right. Two columns once each one
+                            // still fits a setpoint row and the mode chips.
+                            readonly property bool twoColumns: width >= root.cardMinWidth * 2 + spacing
+                            readonly property int  halfWidth: Math.floor((width - spacing) / 2)
 
                             Repeater {
                                 model: deviceModel
+                                onItemAdded:   deviceFlow.relayout()
+                                onItemRemoved: deviceFlow.relayout()
 
                                 DeviceCard {
                                     tile: deviceType === "switch" || deviceType === "lock"
-                                          || deviceType === "button"
+                                          || deviceType === "button" || deviceType === "sensor"
                                     visible: root.matchesFilters(modelKey, deviceType,
                                                                  deviceName, groupName, roomName,
                                                                  root.activeTab)
@@ -455,7 +513,9 @@ PlasmoidItem {
                                         ? Math.floor((deviceFlow.width
                                                       - deviceFlow.spacing * (deviceFlow.tileColumns - 1))
                                                      / deviceFlow.tileColumns)
-                                        : deviceFlow.width
+                                        // An open TV remote needs the full row.
+                                        : (deviceFlow.twoColumns && !remoteOpen)
+                                          ? deviceFlow.halfWidth : deviceFlow.width
                                     onToggleRequested:    (id, out) => toggleDevice(id, out)
                                     onBrightnessSet:      (id, val) => setBrightness(id, val)
                                     onRenameRequested:    (key, name) => renameDevice(key, name)
@@ -483,7 +543,14 @@ PlasmoidItem {
                                                        ? under.modelKey : "")
                                     }
                                     onReorderDropped:     () => saveOrder()
+                                    onHeightChanged:      deviceFlow.relayout()
+                                    onWidthChanged:       deviceFlow.relayout()
+                                    onVisibleChanged:     deviceFlow.relayout()
                                 }
+                            }
+                            Connections {
+                                target: deviceModel
+                                function onRowsMoved() { deviceFlow.relayout() }
                             }
                         }
 

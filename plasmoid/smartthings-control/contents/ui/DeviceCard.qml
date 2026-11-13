@@ -90,7 +90,9 @@ Item {
 
     // 4:3 rather than square: an icon, a name and a room fit in three quarters of
     // the height, which buys a whole extra row of devices in the same popup.
-    readonly property real tileRatio: 0.75
+    // Sensors are square: the reading, a two-line name and the humidity line
+    // do not fit in three quarters of the width.
+    readonly property real tileRatio: isSensor ? 1.0 : 0.75
 
     height: tile ? Math.round(card.width * tileRatio)
                  : (listInner.implicitHeight + Kirigami.Units.gridUnit)
@@ -237,7 +239,24 @@ Item {
     readonly property int  batteryPct: battery !== "" ? parseInt(battery) : -1
     readonly property bool batteryLow: batteryPct >= 0 && batteryPct <= 30
 
-    readonly property bool tileActive: isLock ? lockIsUnlocked : (isOn && hasOnOff)
+    // Motion is the sensor's "on": it gets the same coral bar.
+    readonly property bool tileActive: isLock ? lockIsUnlocked
+                                     : isSensor ? (motion && temperature === "" && deviceOnline)
+                                     : (isOn && hasOnOff)
+
+    // Sensor tiles: a temperature sensor shows the reading big; the line under
+    // the name carries humidity, a low battery, or the motion state.
+    readonly property bool sensorReading: isSensor && temperature !== ""
+    readonly property string sensorLine: {
+        const parts = []
+        if (temperature !== "") {
+            if (humidity !== "") parts.push(humidity)
+        } else {
+            parts.push(motion ? "ACTIVO" : "EN REPOSO")
+        }
+        if (batteryLow) parts.push("BAT " + battery)
+        return parts.join(" · ")
+    }
 
     // A room that just repeats the device name adds nothing.
     readonly property string roomLabel:
@@ -506,7 +525,20 @@ Item {
 
             Item { Layout.fillHeight: true }
 
+            // A temperature sensor's tile leads with the reading: the number is
+            // what you open the tab for, and an icon says nothing a name does not.
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                visible: card.sensorReading
+                text: card.temperature.replace("°C", "°")
+                font.family: "monospace"
+                font.bold: true
+                font.pixelSize: Math.min(Math.round(card.fontM * 1.9), Math.round(card.height * 0.3))
+                color: card.deviceOnline ? card.nameColor : card.secondColor
+            }
+
             Kirigami.Icon {
+                visible: !card.sensorReading
                 Layout.alignment: Qt.AlignHCenter
                 // Sized off the height: on a 4:3 tile that is what runs out first.
                 Layout.preferredWidth:  Math.min(Kirigami.Units.iconSizes.large,
@@ -525,7 +557,12 @@ Item {
                 visible: !card.editingName
                 text: card.deviceName
                 horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideMiddle
+                // Sensor names run long ("temperatura Cobertizo") and the tail
+                // is the part that tells them apart: two lines, not an elision
+                // in the middle. The big reading leaves the room for it.
+                wrapMode: card.isSensor ? Text.Wrap : Text.NoWrap
+                maximumLineCount: card.isSensor ? 2 : 1
+                elide: card.isSensor ? Text.ElideRight : Text.ElideMiddle
                 font.bold: true
                 font.pixelSize: card.fontS
                 color: card.titleColor
@@ -548,19 +585,22 @@ Item {
             PC3.Label {
                 Layout.fillWidth: true
                 visible: !card.isLock && !card.editingName
-                         && (card.subLabel !== "" || card.batteryLow || !card.deviceOnline)
+                         && (card.subLabel !== "" || card.batteryLow || !card.deviceOnline
+                             || card.isSensor)
                 // A tile has one secondary line, so a battery worth worrying
                 // about shares it with the room: as a tile, a button has nowhere
                 // else to report it, and silence would read as "fine".
                 text: {
                     if (!card.deviceOnline) return "SIN RED"
+                    if (card.isSensor) return card.sensorLine
                     const where = card.subLabel.toUpperCase()
                     if (!card.batteryLow) return where
                     return where !== "" ? where + " · " + card.battery : card.battery
                 }
-                color: card.batteryLow ? card.stateColor : card.secondColor
+                color: (card.batteryLow || (card.isSensor && card.motion)) ? card.stateColor
+                                                                            : card.secondColor
                 font.pixelSize: card.fontXS
-                font.bold: !card.deviceOnline
+                font.bold: !card.deviceOnline || (card.isSensor && card.motion)
                 font.family: "monospace"
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideMiddle
@@ -785,6 +825,10 @@ Item {
                     Layout.fillWidth: true
                     visible: !card.editingName
                     text: card.deviceName
+                    // Half-width cards at the default popup width cut
+                    // '32" Smart Monitor M9' to '32" Smart Mo…': wrap first.
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 2
                     elide: Text.ElideRight
                     font.bold: true
                     font.pixelSize: card.fontM
