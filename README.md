@@ -53,6 +53,10 @@ and a QML plasmoid renders the controls.
   unfolds a remote: D-pad, OK, BACK/HOME/MENU/GUÍA, transport keys, Netflix /
   YouTube / Prime / Disney+ shortcuts, and picture and sound mode. See
   [TVs](#tvs).
+- **Send a movie to a TV** (with [watchtv](#watchtv) installed): **▶ ENVIAR
+  PELÍCULA** on any TV card — even one that is off — opens watchtv aimed at that
+  TV; watchtv turns it on through the daemon if needed. While it plays, the card
+  shows the title, the time and a pause button.
 - **Speakers**: play/pause/stop, volume, mute, and what's currently playing.
 - **Appliances** (washer/dryer…): status and current phase, **when it ends**
   (as a clock time), a progress bar split into the cycle's phases, the program
@@ -240,6 +244,9 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 | POST | `/devices/{id}/picture_mode` · `/sound_mode` | `{"value": "Película"}` — a name from the device's list |
 | GET  | `/devices/{id}/raw` | The cloud's raw status, for diagnosing fields the widget doesn't show |
 | GET  | `/capabilities/{id}/{version}` | A capability's definition (commands, arguments, enums) |
+| POST | `/events` | An event from another program: `{"source","level","message","device_name","detail","key"}` |
+| POST | `/watchtv/now` | What watchtv is playing: `{"device_name","title","position","duration","state"}` |
+| GET  | `/watchtv/now` | The same, per SmartThings TV id |
 | POST | `/refresh` | Force a cloud sweep now; returns when it lands |
 | GET  | `/events` | History, newest first (`?device=&level=warn&since=&limit=`) |
 | GET  | `/events/summary` | Warnings/errors per device (`?hours=24`) |
@@ -337,6 +344,44 @@ click should send.
 
 Play/pause on a TV are remote keys too: `mediaPlayback.playbackStatus` is never
 reported, so a single toggle could not know which one to send.
+
+### watchtv
+
+[watchtv](../../apps/watchtv) sends a movie with subtitles to a TV over DLNA or
+Cast. The two projects see the same TVs from opposite sides, and each has what
+the other lacks:
+
+| | SmartThings (this daemon) | watchtv |
+|---|---|---|
+| Sees TVs through | the cloud | the LAN (SSDP / mDNS) |
+| A TV that is off | sees it, **can turn it on** | does not see it at all |
+| Can send it a file | no | **yes** |
+
+What flows between them — every piece optional on both sides:
+
+- **Widget → watchtv**: ▶ ENVIAR PELÍCULA runs `watchtv-gui --device "<TV>"`
+  (detached with `setsid -f`). The daemon reports where watchtv-gui is in
+  `GET /status`; the button only appears when it is installed. The file is
+  chosen in watchtv's window: a file dialog inside the popup would take focus,
+  and the popup closes when it loses it.
+- **watchtv → daemon, turning the TV on**: when the requested TV does not show
+  up on the LAN, watchtv asks for `GET /devices`, matches the name and, if that
+  TV is off, `POST /devices/{id}/on`, then waits up to 35 s for it to appear.
+  Only for an explicitly requested TV — never for "the last one used".
+- **watchtv → daemon, what is playing**: `POST /watchtv/now` every ~10 s and on
+  every state change. The daemon projects the position between reports and
+  drops the entry after 35 s of silence (watchtv killed, laptop closed).
+- **watchtv → history**: connection lost, recovery, failed starts arrive via
+  `POST /events` with `source: "watchtv"` and land on that TV's card.
+- **Pause from the widget** needs no channel to watchtv: the TV obeys its own
+  remote's PAUSE/PLAY during a DLNA session, and the widget already sends those.
+
+**Matching names.** Over DLNA a TV announces itself as `[TV] The Frame`, while
+SmartThings calls it `The Frame`. Both sides normalise the same way (bracketed
+prefix dropped, lowercase, punctuation to spaces) and accept containment only
+when it is unambiguous. A TV that announces itself by model (`TV living`) cannot
+be matched by name — so watchtv learns the pair the first time it turns that
+TV on and exactly one new video renderer appears, and keeps it in its prefs.
 
 ### Appliances and Smart Control
 

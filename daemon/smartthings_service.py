@@ -24,6 +24,9 @@ Endpoints:
   GET  /events             → history, newest first (?device=&level=&since=&limit=)
   GET  /events/summary     → warnings/errors per device (?hours=24)
   POST /events/clear       → wipe the history
+  POST /events             → an event from another program (watchtv)
+  POST /watchtv/now        → what watchtv is playing (see watchtv_bridge.py)
+  GET  /watchtv/now        → the same, per TV
 """
 
 import json
@@ -38,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from event_log import EventLog
+import watchtv_bridge
 
 CONFIG_FILE        = Path.home() / ".config" / "smartthings-widget" / "config.json"
 CHANNEL_NAMES_FILE = Path.home() / ".config" / "smartthings-widget" / "channel_names.json"
@@ -184,6 +188,14 @@ _auth_state: dict = {"pending": False, "error": None}
 _motion_alerted: set[str] = set()
 
 _events: EventLog | None = None   # created in main(); see event_log.py
+_now_playing = watchtv_bridge.NowPlaying()
+
+
+def _tv_list() -> list:
+    """SmartThings TVs with their local alias applied, for name matching."""
+    aliases = _load_aliases()
+    return [_with_aliases(d, aliases) for d in _client.devices.values()
+            if d.get("type") == "tv"]
 
 
 # ── History ───────────────────────────────────────────────────────────────────
@@ -541,8 +553,16 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if path == "/watchtv/now":
+            self._send_json(200, {tv["id"]: _now_playing.get(tv["id"])
+                                  for tv in _tv_list() if _now_playing.get(tv["id"])})
+            return
+
         if path == "/status":
             self._send_json(200, {
+                # Where watchtv-gui lives, so the widget can offer to send a
+                # movie to a TV — "" when it is not installed.
+                "watchtv": watchtv_bridge.gui_path(),
                 "ok": _last_error is None,
                 "error": _last_error,
                 "last_refresh": _last_refresh,
@@ -557,8 +577,13 @@ class Handler(BaseHTTPRequestHandler):
             out = []
             for d in _client.devices.values():
                 row = issues.get(d["id"])
-                out.append({**_with_aliases(d, aliases),
-                            "issues": (row["errors"] + row["warnings"]) if row else 0})
+                dev = {**_with_aliases(d, aliases),
+                       "issues": (row["errors"] + row["warnings"]) if row else 0}
+                if d.get("type") == "tv":
+                    watching = _now_playing.get(d["id"])
+                    if watching:
+                        dev["state"] = {**(dev.get("state") or {}), "watching": watching}
+                out.append(dev)
             # The body is the cache; the header says how old the cloud read is,
             # so a client can show real freshness instead of "just re-read it".
             self._send_json(200, out, {"X-Last-Refresh": f"{_last_refresh:.3f}"})
@@ -660,6 +685,49 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"[refresh] {e}", file=sys.stderr)
                 self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        if path == "/events":
+            # From another program on this machine. The device is named the
+            # way that program sees it; it is matched to a SmartThings device
+            # so the row lands on the right card.
+            level   = str(body.get("level", "info"))
+            message = str(body.get("message", "")).strip()[:300]
+            source  = str(body.get("source", "externo")).strip()[:30] or "externo"
+            if not message:
+                self._send_json(400, {"ok": False, "error": "message required"})
+                return
+            name = str(body.get("device_name", ""))
+            tv = watchtv_bridge.match_tv(name, _tv_list()) if name else None
+            _events.add(level, source, f"{source}: {message}",
+                        device_id=tv["id"] if tv else "",
+                        device_name=tv["name"] if tv else name,
+                        detail=str(body.get("detail", ""))[:2000],
+                        key=str(body.get("key", ""))[:80])
+            self._send_json(200, {"ok": True, "device_id": tv["id"] if tv else ""})
+            return
+
+        if path == "/watchtv/now":
+            name = str(body.get("device_name", ""))
+            tv = watchtv_bridge.match_tv(name, _tv_list())
+            if not tv:
+                self._send_json(404, {"ok": False, "error": f"no SmartThings TV matches {name!r}"})
+                return
+            st = str(body.get("state", "playing"))
+            if st not in ("playing", "paused", "stopped"):
+                self._send_json(400, {"ok": False, "error": "state: playing|paused|stopped"})
+                return
+            def num(k):
+                v = body.get(k)
+                return float(v) if isinstance(v, (int, float)) else None
+            _now_playing.update(tv["id"], {
+                "title":       str(body.get("title", ""))[:200],
+                "position":    num("position"),
+                "duration":    num("duration"),
+                "state":       st,
+                "device_name": name,
+            })
+            self._send_json(200, {"ok": True, "device_id": tv["id"]})
             return
 
         if path == "/events/clear":

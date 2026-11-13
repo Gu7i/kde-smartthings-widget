@@ -74,6 +74,9 @@ Item {
     signal machineRequested(string id, string state)   // run | pause
     // mute · input · picture_mode · sound_mode · key · channel_up · channel_down
     signal tvCommand(string id, string action, var value)
+    // Open watchtv aimed at this TV (it turns the TV on if needed).
+    signal sendToTvRequested(string name)
+    property bool watchtvAvailable: false
     // A wheel turn over a slider scrolls the list instead of moving the slider.
     signal scrollRequested(real delta)
     signal copyRequested(string text)
@@ -142,6 +145,17 @@ Item {
     readonly property bool muted: med.mute === true
     readonly property var  tvInputs: med.inputs || []
     property bool remoteOpen: false
+    // What watchtv is playing on this TV, if anything (the daemon drops it
+    // when reports stop arriving).
+    readonly property var watching: med.watching || null
+
+    function clock(sec) {
+        if (sec == null || !(sec >= 0)) return "—"
+        sec = Math.floor(sec)
+        const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60
+        const p = n => (n < 10 ? "0" : "") + n
+        return (h > 0 ? h + ":" + p(m) : m) + ":" + p(s)
+    }
     readonly property bool tvOnTuner: ["dtv", "digitalTv", "TV", "atv"].indexOf(med.input || "") >= 0
 
     // What the screen is showing: the foreground app if there is one, else
@@ -1108,6 +1122,58 @@ Item {
                     }
                 }
 
+                // watchtv: the movie it is sending to this TV. Pause and play
+                // are the TV's own remote keys — the TV obeys them during a
+                // DLNA session, so the widget needs no channel to watchtv.
+                ColumnLayout {
+                    visible: card.isTv && card.watching !== null
+                    Layout.fillWidth: true
+                    spacing: 3
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Text {
+                            text: "WATCHTV"
+                            font.pixelSize: card.fontXS; font.bold: true; font.family: "monospace"
+                            color: card.stateColor
+                        }
+                        PC3.Label {
+                            Layout.fillWidth: true
+                            text: card.watching ? card.watching.title : ""
+                            elide: Text.ElideRight
+                            font.pixelSize: card.fontS
+                            font.bold: true
+                            color: card.nameColor
+                        }
+                        Text {
+                            text: card.watching
+                                  ? card.clock(card.watching.position) + " / " + card.clock(card.watching.duration)
+                                  : ""
+                            font.pixelSize: card.fontXS; font.family: "monospace"
+                            color: card.secondColor
+                        }
+                        KeyButton {
+                            readonly property bool isPaused: card.watching && card.watching.state === "paused"
+                            iconName: isPaused ? "media-playback-start" : "media-playback-pause"
+                            tip: isPaused ? "Seguir" : "Pausar"
+                            onClicked: card.tvCommand(card.deviceId, "key", isPaused ? "PLAY" : "PAUSE")
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 3
+                        color: "#3C3C3C"
+                        Rectangle {
+                            height: parent.height
+                            width: (card.watching && card.watching.duration > 0)
+                                   ? parent.width * Math.min(1, card.watching.position / card.watching.duration) : 0
+                            color: card.watching && card.watching.state === "paused" ? card.secondColor
+                                                                                     : card.stateColor
+                        }
+                    }
+                }
+
                 RowLayout {
                     Layout.fillWidth: true
                     Text {
@@ -1166,13 +1232,6 @@ Item {
                     }
                 }
 
-                // The remote: folded by default, it is twice the card's height.
-                KeyButton {
-                    visible: card.isTv && card.med.remote === true
-                    glyph: card.remoteOpen ? "CONTROL ▴" : "CONTROL ▾"
-                    on: false
-                    onClicked: card.remoteOpen = !card.remoteOpen
-                }
 
                 RowLayout {
                     visible: card.isTv && card.remoteOpen && card.med.remote === true
@@ -1271,6 +1330,29 @@ Item {
                         enabled: card.deviceOnline
                         onActivated: card.tvCommand(card.deviceId, "sound_mode", currentText)
                     }
+                }
+            }
+
+            // TV actions that make sense on or off: watchtv turns the TV on.
+            RowLayout {
+                visible: card.isTv && !card.editingName
+                         && (card.watchtvAvailable || (card.isOn && card.med.remote === true))
+                Layout.fillWidth: true
+                spacing: 5
+
+                // The remote: folded by default, it is twice the card's height.
+                KeyButton {
+                    visible: card.isOn && card.med.remote === true
+                    glyph: card.remoteOpen ? "CONTROL ▴" : "CONTROL ▾"
+                    onClicked: card.remoteOpen = !card.remoteOpen
+                }
+                Item { Layout.fillWidth: true }
+                KeyButton {
+                    visible: card.watchtvAvailable
+                    glyph: "▶ ENVIAR PELÍCULA"
+                    tip: card.isOn ? "Elegir una película y mandarla a esta TV (watchtv)"
+                                   : "Encenderla y mandarle una película (watchtv)"
+                    onClicked: card.sendToTvRequested(card.deviceName)
                 }
             }
 

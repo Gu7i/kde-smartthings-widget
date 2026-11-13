@@ -3,6 +3,7 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.plasma.plasmoid
 import org.kde.kirigami as Kirigami
+import org.kde.plasma.plasma5support as P5Support
 
 PlasmoidItem {
     id: root
@@ -465,6 +466,8 @@ PlasmoidItem {
                                     onSetpointSet:        (id, val) => setSetpoint(id, val)
                                     onMachineRequested:   (id, st) => setMachine(id, st)
                                     onTvCommand:          (id, act, val) => tvCmd(id, act, val)
+                                    watchtvAvailable:     root.watchtvPath !== ""
+                                    onSendToTvRequested:  (name) => root.launchWatchtv(name)
                                     onScrollRequested:    (delta) => scrollView.scrollBy(delta)
                                     onCopyRequested:      (text) => copyToClipboard(text, "COPIADO AL PORTAPAPELES")
                                     onInfoRequested:      (title, body) => infoPanel.show(title, body)
@@ -991,6 +994,10 @@ PlasmoidItem {
     property var customOrder: []
     property bool reordering: false
     property bool orderDirty: false          // a drag moved something since the drop
+    // Where watchtv-gui is installed ("" = not installed), as the daemon found
+    // it. watchtv sends movies to a TV; see daemon/watchtv_bridge.py.
+    property string watchtvPath: ""
+
     // History (the daemon's event log). Fetched only while that tab is open.
     property var events: []
     property var eventSummary: ({})
@@ -1099,6 +1106,7 @@ PlasmoidItem {
     Component.onCompleted: {
         rebuildVisibleTabs()
         fetchOrder()
+        fetchStatus()
     }
 
     readonly property var tabCounts: {
@@ -1173,7 +1181,7 @@ PlasmoidItem {
     // root.expanded, not the bare name: expandedChanged carries a parameter, and
     // an unqualified `expanded` binds to that injected argument — deprecated in
     // Qt 6 and gone in Qt 7.
-    onExpandedChanged: if (root.expanded) fetchDevices()
+    onExpandedChanged: if (root.expanded) { fetchDevices(); fetchStatus() }
 
     // ── Timers ────────────────────────────────────────────────────────────────
     Timer {
@@ -1661,6 +1669,48 @@ PlasmoidItem {
         xhr.onerror   = () => { showError(`Falló «${label}»: daemon sin respuesta`); fetchDevices() }
         xhr.ontimeout = () => { showError(`Falló «${label}»: sin respuesta`); fetchDevices() }
         xhr.send(bodyStr || "{}")
+    }
+
+    // ── watchtv ───────────────────────────────────────────────────────────────
+
+    function fetchStatus() {
+        const xhr = new XMLHttpRequest()
+        xhr.open("GET", daemonUrl + "/status")
+        xhr.timeout = 5000
+        xhr.onreadystatechange = () => {
+            if (xhr.readyState !== XMLHttpRequest.DONE || xhr.status !== 200) return
+            try { watchtvPath = JSON.parse(xhr.responseText).watchtv || "" } catch (e) { }
+        }
+        xhr.send()
+    }
+
+    // The executable engine waits for the command to exit, and a source that is
+    // still connected cannot be started again — so a second click on the same
+    // TV would do nothing while the first window stayed open. setsid -f detaches
+    // the window and returns at once.
+    P5Support.DataSource {
+        id: launcher
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => disconnectSource(source)
+    }
+
+    function shellQuote(s) {
+        return "'" + String(s).replace(/'/g, "'\\''") + "'"
+    }
+
+    // The SmartThings name goes as --device: watchtv matches it to the name the
+    // TV announces on the LAN, and turns the TV on through the daemon if it is
+    // off. Choosing the file happens in watchtv's window — a file dialog here
+    // would take focus, and the popup closes the moment it loses it.
+    function launchWatchtv(deviceName) {
+        if (watchtvPath === "") return
+        launcher.connectSource("setsid -f " + shellQuote(watchtvPath)
+                               + " --device " + shellQuote(deviceName)
+                               + " >/dev/null 2>&1")
+        flashMsg = "ABRIENDO WATCHTV · " + deviceName.toUpperCase()
+        flashTimer.restart()
+        root.expanded = false
     }
 
     // ── History ───────────────────────────────────────────────────────────────
