@@ -464,6 +464,7 @@ PlasmoidItem {
                                     onAcModeSet:          (id, mode) => setAcMode(id, mode)
                                     onSetpointSet:        (id, val) => setSetpoint(id, val)
                                     onMachineRequested:   (id, st) => setMachine(id, st)
+                                    onTvCommand:          (id, act, val) => tvCmd(id, act, val)
                                     onScrollRequested:    (delta) => scrollView.scrollBy(delta)
                                     onCopyRequested:      (text) => copyToClipboard(text, "COPIADO AL PORTAPAPELES")
                                     onInfoRequested:      (title, body) => infoPanel.show(title, body)
@@ -1342,6 +1343,7 @@ PlasmoidItem {
                         machineState: "",
                         jobState:     "",
                         appliance:    "",
+                        media:        "",
                         issues:       d.issues ?? 0,
                     }
                     if (idx >= 0) deviceModel.set(idx, flat)
@@ -1412,6 +1414,7 @@ PlasmoidItem {
             // objects into sub-models, and ten more flat roles for one device
             // type would be noise on every other card.
             appliance:    d.type === "appliance" ? JSON.stringify(s) : "",
+            media:        (d.type === "tv" || d.type === "speaker") ? JSON.stringify(s) : "",
             issues:       d.issues ?? 0,
         }
     }
@@ -1595,6 +1598,23 @@ PlasmoidItem {
         const idx = findIndex(id)
         if (idx >= 0) deviceModel.setProperty(idx, "setpoint", val)
         postAction(id, "setpoint", JSON.stringify({value: val}), id)
+    }
+
+    // TV / speaker commands beyond volume and playback. Fields that have a
+    // state are patched into the card's JSON at once, like every other control;
+    // keys and channel steps have none to patch.
+    function tvCmd(id, action, value) {
+        const field = { mute: "mute", input: "input",
+                        picture_mode: "picture_mode", sound_mode: "sound_mode" }[action]
+        const idx = findIndex(id)
+        if (field && idx >= 0) {
+            try {
+                const st = JSON.parse(deviceModel.get(idx).media || "{}")
+                st[field] = value
+                deviceModel.setProperty(idx, "media", JSON.stringify(st))
+            } catch (e) { }
+        }
+        postAction(id, action, value === undefined ? "{}" : JSON.stringify({value: value}), id)
     }
 
     function setMachine(id, state) {

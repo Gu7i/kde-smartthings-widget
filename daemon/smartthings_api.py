@@ -460,6 +460,34 @@ class SmartThingsClient:
             return False
         return self._command(device_id, "main", "mediaPlayback", command)
 
+    def set_mute(self, device_id: str, muted: bool) -> bool:
+        return self._command(device_id, "main", "audioMute", "mute" if muted else "unmute")
+
+    def set_input(self, device_id: str, source: str) -> bool:
+        caps = self._devices.get(device_id, {}).get("components", {}).get("main", [])
+        if "samsungvd.mediaInputSource" in caps:
+            return self._command(device_id, "main", "samsungvd.mediaInputSource",
+                                 "setInputSource", [source])
+        return self._command(device_id, "main", "mediaInputSource",
+                             "setInputSource", [source])
+
+    def channel_step(self, device_id: str, up: bool) -> bool:
+        return self._command(device_id, "main", "tvChannel",
+                             "channelUp" if up else "channelDown")
+
+    def send_key(self, device_id: str, key: str) -> bool:
+        return self._command(device_id, "main", "samsungvd.remoteControl", "send",
+                             [key, "PRESS_AND_RELEASED"])
+
+    def set_av_mode(self, device_id: str, which: str, mode: str) -> bool:
+        """which: "picture" | "sound". Uses whichever capability the device has."""
+        state = self._devices.get(device_id, {}).get("state") or {}
+        cap = state.get(f"{which}_cap")
+        if not cap:
+            return False
+        cmd = "setPictureMode" if which == "picture" else "setSoundMode"
+        return self._command(device_id, "main", cap, cmd, [mode])
+
     # ── Appliances (washer / dryer / dishwasher) ─────────────────────────────
     def set_machine_state(self, device_id: str, state: str) -> bool:
         if state not in ("run", "pause", "stop"):
@@ -549,6 +577,60 @@ def _iso_to_epoch(value) -> float | None:
         return None
 
 
+def _tv_state(status: dict) -> dict:
+    """Samsung TVs and monitors.
+
+    Inputs come from `samsungvd.mediaInputSource`, which names them the way the
+    user did on the TV ("XBOX One", not "HDMI1"); the standard capability's
+    list is empty on these models. Picture and sound modes live under
+    `custom.*` on TVs and `samsungvd.*` on monitors — same commands, same
+    arguments (the mode's display name) — so the state carries which one this
+    device has and the command just uses it."""
+    main = "main"
+
+    def cv(cap, attr):
+        return _cap_value(status, main, cap, attr)
+
+    def has(cap):
+        return cap in (status.get("components", {}).get(main) or {})
+
+    inputs = [{"id": i.get("id", ""), "name": i.get("name") or i.get("id", "")}
+              for i in (cv("samsungvd.mediaInputSource", "supportedInputSourcesMap") or [])
+              if isinstance(i, dict) and i.get("id")]
+    if not inputs:
+        inputs = [{"id": i, "name": i}
+                  for i in (cv("mediaInputSource", "supportedInputSources") or [])
+                  if isinstance(i, str)]
+
+    # tvChannelName holds the foreground Tizen app as "<package>.<AppName>"
+    # ("MCmYXNxgcu.DisneyPlus") — the closest thing to "what is it showing".
+    chname = cv("tvChannel", "tvChannelName") or ""
+    app = chname.split(".", 1)[1] if "." in chname else ""
+
+    pic_cap = next((c for c in ("custom.picturemode", "samsungvd.pictureMode") if has(c)), "")
+    snd_cap = next((c for c in ("custom.soundmode", "samsungvd.soundMode") if has(c)), "")
+    mute = cv("audioMute", "mute")
+
+    return {
+        "on":            cv("switch", "switch") == "on",
+        "volume":        cv("audioVolume", "volume"),
+        "mute":          (mute == "muted") if mute is not None else None,
+        "playback":      cv("mediaPlayback", "playbackStatus") or "",
+        "input":         (cv("samsungvd.mediaInputSource", "inputSource")
+                          or cv("mediaInputSource", "inputSource") or ""),
+        "inputs":        inputs,
+        "channel":       cv("tvChannel", "tvChannel") or "",
+        "app":           app,
+        "picture_cap":   pic_cap,
+        "picture_mode":  cv(pic_cap, "pictureMode") or "" if pic_cap else "",
+        "picture_modes": (cv(pic_cap, "supportedPictureModes") or []) if pic_cap else [],
+        "sound_cap":     snd_cap,
+        "sound_mode":    cv(snd_cap, "soundMode") or "" if snd_cap else "",
+        "sound_modes":   (cv(snd_cap, "supportedSoundModes") or []) if snd_cap else [],
+        "remote":        has("samsungvd.remoteControl"),
+    }
+
+
 def _appliance_state(status: dict, battery) -> dict:
     """Washer / dryer / dishwasher.
 
@@ -632,22 +714,19 @@ def _extract_state(dev: dict, status: dict) -> dict:
         return {"key": 0, "battery": battery}
 
     if dtype == "tv":
-        return {
-            "on":       _cap_value(status, main, "switch", "switch") == "on",
-            "volume":   _cap_value(status, main, "audioVolume", "volume"),
-            "playback": _cap_value(status, main, "mediaPlayback", "playbackStatus") or "",
-            "input":    _cap_value(status, main, "mediaInputSource", "inputSource") or "",
-        }
+        return _tv_state(status)
 
     if dtype == "speaker":
         track = _cap_value(status, main, "audioTrackData", "audioTrackData") or {}
         title = ""
         if isinstance(track, dict):
             title = track.get("title") or track.get("mediaSource") or ""
+        mute = _cap_value(status, main, "audioMute", "mute")
         return {
             "playback": _cap_value(status, main, "mediaPlayback", "playbackStatus") or "",
             "volume":   _cap_value(status, main, "audioVolume", "volume"),
             "title":    title,
+            "mute":     (mute == "muted") if mute is not None else None,
         }
 
     if dtype == "ac":

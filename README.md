@@ -47,8 +47,13 @@ and a QML plasmoid renders the controls.
 - **Dimmers**: brightness slider (`switchLevel`).
 - **Air conditioners**: on/off, target temperature (−/+ within the device's
   range), mode (auto/cool/dry/fan/heat), plus current temperature & humidity.
-- **TVs**: on/off, volume slider, play/pause/stop, current input.
-- **Speakers**: play/pause/stop, volume, and what's currently playing.
+- **TVs**: on/off, volume, mute, what is on screen (the foreground app, e.g.
+  *DisneyPlus*, or the input), channel ± on the tuner, and the inputs as chips
+  under the names given on the TV (*XBOX One*, *NintendoSwitch*). **CONTROL ▾**
+  unfolds a remote: D-pad, OK, BACK/HOME/MENU/GUÍA, transport keys, Netflix /
+  YouTube / Prime / Disney+ shortcuts, and picture and sound mode. See
+  [TVs](#tvs).
+- **Speakers**: play/pause/stop, volume, mute, and what's currently playing.
 - **Appliances** (washer/dryer…): status and current phase, **when it ends**
   (as a clock time), a progress bar split into the cycle's phases, the program
   settings (temperature · spin · rinses), child lock, and start/pause. When
@@ -228,7 +233,13 @@ ln -s "$PWD/../plasmoid/smartthings-control" \
 | POST | `/devices/{id}/setpoint` | `{"value": 22}` (AC) |
 | POST | `/devices/{id}/lock` · `/unlock` | Door lock |
 | POST | `/devices/{id}/machine` | `{"value": "run"}` / `"pause"` / `"stop"` (appliance) — `409` if Smart Control is off |
+| POST | `/devices/{id}/mute` | `{"value": true}` (TV / speaker) |
+| POST | `/devices/{id}/input` | `{"value": "HDMI1"}` — an id from the device's `inputs` |
+| POST | `/devices/{id}/channel_up` · `/channel_down` | TV tuner |
+| POST | `/devices/{id}/key` | `{"value": "OK"}` — remote key, from a whitelist |
+| POST | `/devices/{id}/picture_mode` · `/sound_mode` | `{"value": "Película"}` — a name from the device's list |
 | GET  | `/devices/{id}/raw` | The cloud's raw status, for diagnosing fields the widget doesn't show |
+| GET  | `/capabilities/{id}/{version}` | A capability's definition (commands, arguments, enums) |
 | POST | `/refresh` | Force a cloud sweep now; returns when it lands |
 | GET  | `/events` | History, newest first (`?device=&level=warn&since=&limit=`) |
 | GET  | `/events/summary` | Warnings/errors per device (`?hours=24`) |
@@ -304,6 +315,28 @@ keys as the aliases), not in the plasmoid config: keeping it next to the daemon
 means it survives plasmashell reloads and reinstalls, and any future client can
 read the same arrangement. Devices missing from the list — a newly paired one,
 say — sort after the ordered ones by room.
+
+### TVs
+
+Samsung TVs and monitors expose much more than the standard media
+capabilities, mostly under vendor namespaces:
+
+| What | Capability | Note |
+|---|---|---|
+| Inputs, with names | `samsungvd.mediaInputSource` | the standard `mediaInputSource` list is empty on these models |
+| Foreground app | `tvChannel.tvChannelName` | holds `<package>.<AppName>`; the widget shows the part after the dot |
+| Picture / sound mode | `custom.picturemode` (TVs) or `samsungvd.pictureMode` (monitors), same for sound | same command, argument is the mode's display name |
+| Remote keys | `samsungvd.remoteControl.send(key, PRESS_AND_RELEASED)` | |
+
+App shortcuts are sent as **remote keys** (`FUNCTIONS_NETFLIX`,
+`FUNCTIONS_YOUTUBE`, `FUNCTIONS_AMAZON`, `DISNEY`) rather than through
+`custom.launchapp`: launching by app id needs Tizen ids that differ by model and
+region, while the keys are part of the capability's own enum. The daemon only
+accepts keys from a whitelist — `POWER` and friends are not something a stray
+click should send.
+
+Play/pause on a TV are remote keys too: `mediaPlayback.playbackStatus` is never
+reported, so a single toggle could not know which one to send.
 
 ### Appliances and Smart Control
 

@@ -50,6 +50,8 @@ Item {
     // appliance
     required property string machineState
     required property string jobState
+    // Full TV / speaker state from the daemon, as JSON ("" for anything else).
+    required property string media
     // Full appliance state from the daemon, as JSON ("" for anything else).
     required property string appliance
     // Warnings + errors the daemon logged for this device in the last 24 h.
@@ -70,6 +72,8 @@ Item {
     signal acModeSet(string id, string mode)
     signal setpointSet(string id, int value)
     signal machineRequested(string id, string state)   // run | pause
+    // mute · input · picture_mode · sound_mode · key · channel_up · channel_down
+    signal tvCommand(string id, string action, var value)
     // A wheel turn over a slider scrolls the list instead of moving the slider.
     signal scrollRequested(real delta)
     signal copyRequested(string text)
@@ -129,6 +133,24 @@ Item {
     readonly property bool lockIsUnlocked: lockLocked === 0
 
     readonly property var acModeList: acModes.length ? acModes.split(",") : []
+
+    // ── TV / speaker ──────────────────────────────────────────────────────────
+    readonly property var med: {
+        if (media === "") return ({})
+        try { return JSON.parse(media) } catch (e) { return ({}) }
+    }
+    readonly property bool muted: med.mute === true
+    readonly property var  tvInputs: med.inputs || []
+    property bool remoteOpen: false
+    readonly property bool tvOnTuner: ["dtv", "digitalTv", "TV", "atv"].indexOf(med.input || "") >= 0
+
+    // What the screen is showing: the foreground app if there is one, else
+    // the input under the name the user gave it on the TV.
+    readonly property string tvSource: {
+        if (med.app) return med.app
+        const i = tvInputs.find(x => x.id === med.input)
+        return i ? i.name : (med.input || "")
+    }
 
     // ── Appliance ─────────────────────────────────────────────────────────────
     readonly property var appl: {
@@ -322,6 +344,52 @@ Item {
             QQC2.ToolTip.text: card.issues + (card.issues === 1 ? " incidencia" : " incidencias")
                                + " en 24 h · ver historial"
             QQC2.ToolTip.visible: containsMouse
+        }
+    }
+
+    // Square-ish outlined button used across the TV controls. `on` fills it
+    // coral (a state, e.g. muted); `glyph` is text, `iconName` a theme icon.
+    component KeyButton: Rectangle {
+        property string glyph: ""
+        property string iconName: ""
+        property bool on: false
+        property string tip: ""
+        signal clicked
+
+        implicitWidth:  Math.max(Kirigami.Units.gridUnit * 1.6,
+                                 keyText.implicitWidth + Kirigami.Units.gridUnit * 0.7)
+        implicitHeight: Kirigami.Units.gridUnit * 1.35
+        color: on ? card.stateColor : (keyArea.pressed ? "#33FFFFFF"
+                                     : keyArea.containsMouse ? "#1AFFFFFF" : "transparent")
+        border.color: on ? card.stateColor : card.structColor
+        border.width: 1
+
+        Text {
+            id: keyText
+            anchors.centerIn: parent
+            visible: parent.glyph !== ""
+            text: parent.glyph
+            font.pixelSize: card.fontXS; font.bold: true; font.family: "monospace"
+            color: parent.on ? card.onInk : card.structColor
+        }
+        Kirigami.Icon {
+            anchors.centerIn: parent
+            visible: parent.iconName !== ""
+            width: Math.round(Kirigami.Units.iconSizes.small * 0.8); height: width
+            isMask: true
+            source: parent.iconName
+            color: parent.on ? card.onInk : card.structColor
+        }
+        MouseArea {
+            id: keyArea
+            anchors.fill: parent
+            hoverEnabled: true
+            enabled: card.deviceOnline
+            cursorShape: Qt.PointingHandCursor
+            onClicked: parent.clicked()
+            QQC2.ToolTip.text: parent.tip
+            QQC2.ToolTip.visible: containsMouse && parent.tip !== ""
+            QQC2.ToolTip.delay: 600
         }
     }
 
@@ -974,60 +1042,69 @@ Item {
                 Layout.fillWidth: true
                 spacing: 3
 
+                // Speaker: playback + what is playing.
                 RowLayout {
+                    visible: card.isSpeaker
                     Layout.fillWidth: true
                     spacing: 5
 
-                    Rectangle {   // play / pause
-                        implicitWidth:  Kirigami.Units.gridUnit * 1.7
-                        implicitHeight: Kirigami.Units.gridUnit * 1.25
-                        color: "transparent"
-                        border.color: card.structColor
-                        border.width: 1
-                        Kirigami.Icon {
-                            anchors.centerIn: parent
-                            width: Math.round(Kirigami.Units.iconSizes.small * 0.8); height: width
-                            isMask: true
-                            source: card.playing ? "media-playback-pause" : "media-playback-start"
-                            color: card.structColor
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: card.deviceOnline
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: card.playbackRequested(card.deviceId,
-                                           card.playing ? "pause" : "play")
-                        }
+                    KeyButton {
+                        iconName: card.playing ? "media-playback-pause" : "media-playback-start"
+                        onClicked: card.playbackRequested(card.deviceId, card.playing ? "pause" : "play")
                     }
-
-                    Rectangle {   // stop
-                        implicitWidth:  Kirigami.Units.gridUnit * 1.7
-                        implicitHeight: Kirigami.Units.gridUnit * 1.25
-                        color: "transparent"
-                        border.color: card.structColor
-                        border.width: 1
-                        Kirigami.Icon {
-                            anchors.centerIn: parent
-                            width: Math.round(Kirigami.Units.iconSizes.small * 0.8); height: width
-                            isMask: true
-                            source: "media-playback-stop"
-                            color: card.structColor
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: card.deviceOnline
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: card.playbackRequested(card.deviceId, "stop")
-                        }
+                    KeyButton {
+                        iconName: "media-playback-stop"
+                        onClicked: card.playbackRequested(card.deviceId, "stop")
                     }
-
                     PC3.Label {   // a track title is a name, not a field
                         Layout.fillWidth: true
-                        text: card.isSpeaker ? card.mediaTitle : card.tvInput
-                        visible: (card.isSpeaker ? card.mediaTitle : card.tvInput) !== ""
+                        text: card.mediaTitle
                         elide: Text.ElideRight
                         font.pixelSize: card.fontS
                         color: card.secondColor
+                    }
+                    KeyButton {
+                        visible: card.med.mute != null
+                        iconName: card.muted ? "audio-volume-muted" : "audio-volume-high"
+                        on: card.muted
+                        tip: card.muted ? "Quitar silencio" : "Silenciar"
+                        onClicked: card.tvCommand(card.deviceId, "mute", !card.muted)
+                    }
+                }
+
+                // TV: what is on screen, mute, channel.
+                RowLayout {
+                    visible: card.isTv
+                    Layout.fillWidth: true
+                    spacing: 5
+
+                    PC3.Label {
+                        Layout.fillWidth: true
+                        text: card.tvSource
+                        elide: Text.ElideRight
+                        font.pixelSize: card.fontS
+                        font.bold: true
+                        color: card.nameColor
+                    }
+                    // Channels only mean something on the tuner.
+                    KeyButton {
+                        visible: card.tvOnTuner
+                        glyph: "CH−"
+                        tip: "Canal anterior"
+                        onClicked: card.tvCommand(card.deviceId, "channel_down", undefined)
+                    }
+                    KeyButton {
+                        visible: card.tvOnTuner
+                        glyph: "CH+"
+                        tip: "Canal siguiente"
+                        onClicked: card.tvCommand(card.deviceId, "channel_up", undefined)
+                    }
+                    KeyButton {
+                        visible: card.med.mute != null
+                        iconName: card.muted ? "audio-volume-muted" : "audio-volume-high"
+                        on: card.muted
+                        tip: card.muted ? "Quitar silencio" : "Silenciar"
+                        onClicked: card.tvCommand(card.deviceId, "mute", !card.muted)
                     }
                 }
 
@@ -1053,6 +1130,146 @@ Item {
                         text: Math.round(card.volume) + "%"
                         font.pixelSize: card.fontXS; font.family: "monospace"
                         color: card.nameColor
+                    }
+                }
+
+                // Inputs, under the names given on the TV. One input is no choice.
+                Flow {
+                    visible: card.isTv && card.tvInputs.length > 1
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Repeater {
+                        model: card.tvInputs
+                        delegate: Rectangle {
+                            required property var modelData
+                            readonly property bool selected: modelData.id === card.med.input
+                            width: inTxt.implicitWidth + Kirigami.Units.gridUnit * 0.7
+                            height: Kirigami.Units.gridUnit * 1.15
+                            color: selected ? card.stateColor : "transparent"
+                            border.color: selected ? card.stateColor : card.structColor
+                            border.width: 1
+                            Text {
+                                id: inTxt
+                                anchors.centerIn: parent
+                                text: parent.modelData.name.toUpperCase()
+                                font.pixelSize: card.fontXS; font.bold: true
+                                font.family: "monospace"
+                                color: parent.selected ? card.onInk : card.structColor
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: card.deviceOnline && !parent.selected
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: card.tvCommand(card.deviceId, "input", parent.modelData.id)
+                            }
+                        }
+                    }
+                }
+
+                // The remote: folded by default, it is twice the card's height.
+                KeyButton {
+                    visible: card.isTv && card.med.remote === true
+                    glyph: card.remoteOpen ? "CONTROL ▴" : "CONTROL ▾"
+                    on: false
+                    onClicked: card.remoteOpen = !card.remoteOpen
+                }
+
+                RowLayout {
+                    visible: card.isTv && card.remoteOpen && card.med.remote === true
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.gridUnit * 0.6
+
+                    // D-pad
+                    Grid {
+                        columns: 3
+                        spacing: 3
+                        Layout.alignment: Qt.AlignTop
+                        Item { width: 1; height: 1 }
+                        KeyButton { glyph: "▲"; onClicked: card.tvCommand(card.deviceId, "key", "UP") }
+                        Item { width: 1; height: 1 }
+                        KeyButton { glyph: "◀"; onClicked: card.tvCommand(card.deviceId, "key", "LEFT") }
+                        KeyButton { glyph: "OK"; onClicked: card.tvCommand(card.deviceId, "key", "OK") }
+                        KeyButton { glyph: "▶"; onClicked: card.tvCommand(card.deviceId, "key", "RIGHT") }
+                        Item { width: 1; height: 1 }
+                        KeyButton { glyph: "▼"; onClicked: card.tvCommand(card.deviceId, "key", "DOWN") }
+                        Item { width: 1; height: 1 }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignTop
+                        spacing: 3
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 3
+                            KeyButton { glyph: "BACK"; onClicked: card.tvCommand(card.deviceId, "key", "BACK") }
+                            KeyButton { glyph: "HOME"; onClicked: card.tvCommand(card.deviceId, "key", "HOME") }
+                            KeyButton { glyph: "MENU"; onClicked: card.tvCommand(card.deviceId, "key", "MENU") }
+                            KeyButton { glyph: "GUÍA"; onClicked: card.tvCommand(card.deviceId, "key", "GUIDE") }
+                        }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 3
+                            KeyButton { iconName: "media-seek-backward"; tip: "Retroceder"
+                                        onClicked: card.tvCommand(card.deviceId, "key", "REWIND") }
+                            KeyButton { iconName: "media-playback-start"; tip: "Play"
+                                        onClicked: card.tvCommand(card.deviceId, "key", "PLAY") }
+                            KeyButton { iconName: "media-playback-pause"; tip: "Pausa"
+                                        onClicked: card.tvCommand(card.deviceId, "key", "PAUSE") }
+                            KeyButton { iconName: "media-seek-forward"; tip: "Avanzar"
+                                        onClicked: card.tvCommand(card.deviceId, "key", "FF") }
+                        }
+                        // App shortcuts are remote keys, not app ids: the ids
+                        // differ by model and region, the keys do not.
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 3
+                            KeyButton { glyph: "NETFLIX"; onClicked: card.tvCommand(card.deviceId, "key", "FUNCTIONS_NETFLIX") }
+                            KeyButton { glyph: "YOUTUBE"; onClicked: card.tvCommand(card.deviceId, "key", "FUNCTIONS_YOUTUBE") }
+                            KeyButton { glyph: "PRIME";   onClicked: card.tvCommand(card.deviceId, "key", "FUNCTIONS_AMAZON") }
+                            KeyButton { glyph: "DISNEY+"; onClicked: card.tvCommand(card.deviceId, "key", "DISNEY") }
+                        }
+                    }
+                }
+
+                // Picture and sound modes, by the names the TV uses.
+                RowLayout {
+                    visible: card.isTv && card.remoteOpen
+                             && ((card.med.picture_modes || []).length > 0
+                                 || (card.med.sound_modes || []).length > 0)
+                    Layout.fillWidth: true
+                    spacing: 5
+
+                    Text {
+                        visible: (card.med.picture_modes || []).length > 0
+                        text: "IMAGEN"
+                        font.pixelSize: card.fontXS; font.bold: true; font.family: "monospace"
+                        color: card.structColor
+                    }
+                    QQC2.ComboBox {
+                        visible: (card.med.picture_modes || []).length > 0
+                        Layout.fillWidth: true
+                        font.pixelSize: card.fontXS
+                        model: card.med.picture_modes || []
+                        currentIndex: (card.med.picture_modes || []).indexOf(card.med.picture_mode)
+                        enabled: card.deviceOnline
+                        onActivated: card.tvCommand(card.deviceId, "picture_mode", currentText)
+                    }
+                    Text {
+                        visible: (card.med.sound_modes || []).length > 0
+                        text: "SONIDO"
+                        font.pixelSize: card.fontXS; font.bold: true; font.family: "monospace"
+                        color: card.structColor
+                    }
+                    QQC2.ComboBox {
+                        visible: (card.med.sound_modes || []).length > 0
+                        Layout.fillWidth: true
+                        font.pixelSize: card.fontXS
+                        model: card.med.sound_modes || []
+                        currentIndex: (card.med.sound_modes || []).indexOf(card.med.sound_mode)
+                        enabled: card.deviceOnline
+                        onActivated: card.tvCommand(card.deviceId, "sound_mode", currentText)
                     }
                 }
             }

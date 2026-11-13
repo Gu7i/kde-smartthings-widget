@@ -20,6 +20,7 @@ Endpoints:
   GET  /callback           → OAuth redirect target
   GET  /status             → daemon health
   GET  /devices/{id}/raw   → the cloud's raw status (diagnosis)
+  GET  /capabilities/{id}/{v} → a capability's definition (diagnosis)
   GET  /events             → history, newest first (?device=&level=&since=&limit=)
   GET  /events/summary     → warnings/errors per device (?hours=24)
   POST /events/clear       → wipe the history
@@ -205,6 +206,8 @@ def _describe_change(key: str, old, new) -> tuple[str, str] | None:
         return "info", f"Modo {old or '—'} → {new or '—'}"
     if key == "setpoint":
         return "info", f"Consigna {old}° → {new}°"
+    if key == "app":
+        return ("info", f"App: {new}") if new else None
     if key == "input":
         return "info", f"Entrada {old or '—'} → {new or '—'}"
     if key == "machine_state":
@@ -240,8 +243,11 @@ def _diff_and_log(old: dict, new: dict) -> None:
                 _events.add("info", "state", "Dispositivo nuevo",
                             device_id=did, device_name=name)
             if not dev.get("online", True):
+                # Keyed, so a device that stays offline across daemon restarts
+                # is one row with a count, not one row per restart.
                 _events.add("warn", "connectivity", "Sin conexión",
-                            device_id=did, device_name=name)
+                            device_id=did, device_name=name,
+                            key="conn:offline-at-start", window=7 * 86400)
             continue
 
         if prev.get("online", True) != dev.get("online", True):
@@ -261,7 +267,7 @@ def _diff_and_log(old: dict, new: dict) -> None:
         if dev.get("type") == "appliance":
             _appliance_events(did, name, ps, ns)
 
-        for key in ("on", "locked", "motion", "mode", "setpoint", "input",
+        for key in ("on", "locked", "motion", "mode", "setpoint", "input", "app",
                     "machine_state", "job_state", "battery", "remote"):
             if key not in ns or ps.get(key) == ns.get(key):
                 continue
@@ -340,6 +346,13 @@ def _command_label(action: str, patch: dict, value) -> str:
     if action == "brightness": return f"Brillo {value}%"
     if action == "volume":     return f"Volumen {value}"
     if action == "mode":       return f"Modo {value}"
+    if action == "mute":         return "Silenciar" if value else "Quitar silencio"
+    if action == "input":        return f"Entrada {value}"
+    if action == "channel_up":   return "Canal +"
+    if action == "channel_down": return "Canal −"
+    if action == "key":          return f"Tecla {value}"
+    if action == "picture_mode": return f"Imagen {value}"
+    if action == "sound_mode":   return f"Sonido {value}"
     if action == "machine":
         return {"run": "Iniciar ciclo", "pause": "Pausar ciclo",
                 "stop": "Detener ciclo"}.get(value, f"Máquina {value}")
@@ -347,7 +360,14 @@ def _command_label(action: str, patch: dict, value) -> str:
     return _ACTION_LABEL.get(action, action)
 
 
-_VERIFY_KEYS = {"on", "channels", "locked", "mode", "setpoint", "machine_state"}
+# Remote keys the widget offers. A whitelist rather than the capability's whole
+# enum: POWER and the like are not something a stray click should send.
+TV_KEYS = {"UP", "DOWN", "LEFT", "RIGHT", "OK", "BACK", "HOME", "MENU", "EXIT",
+           "SOURCE", "PLAY", "PAUSE", "STOP", "REWIND", "FF", "GUIDE",
+           "FUNCTIONS_NETFLIX", "FUNCTIONS_YOUTUBE", "FUNCTIONS_AMAZON", "DISNEY"}
+
+_VERIFY_KEYS = {"on", "channels", "locked", "mode", "setpoint", "machine_state",
+                "mute", "input", "picture_mode", "sound_mode"}
 
 
 def _verify_command(did: str, label: str, patch: dict) -> None:
@@ -581,6 +601,19 @@ class Handler(BaseHTTPRequestHandler):
                 names[int(idx)] = name
             self._send_json(200, out)
 
+        elif path.startswith("/capabilities/"):
+            # A capability's definition (commands, arguments, enums): the way to
+            # learn what a vendor capability accepts without the CLI's login.
+            parts = path.split("/")
+            if len(parts) != 4 or not parts[3].isdigit() or \
+               not all(c.isalnum() or c in "._" for c in parts[2]):
+                self._send_json(400, {"error": "use /capabilities/{id}/{version}"})
+                return
+            try:
+                self._send_json(200, _client._get(f"/v1/capabilities/{parts[2]}/{parts[3]}"))
+            except Exception as e:
+                self._send_json(502, {"error": str(e)})
+
         elif path.startswith("/devices/") and path.endswith("/raw"):
             # The cloud's full status, untouched: what to look at when a device
             # reports something the widget does not show yet.
@@ -761,6 +794,28 @@ class Handler(BaseHTTPRequestHandler):
                     patch = {"playback": {"play": "playing", "pause": "paused",
                                           "stop": "stopped"}[action]}
                     run = lambda: _client.media_command(did, action)
+                elif action == "mute":
+                    v = bool(body.get("value", True))
+                    patch = {"mute": v}
+                    run = lambda: _client.set_mute(did, v)
+                elif action == "input":
+                    v = str(body.get("value", ""))
+                    patch = {"input": v}
+                    run = lambda: _client.set_input(did, v)
+                elif action in ("channel_up", "channel_down"):
+                    up = action == "channel_up"
+                    run = lambda: _client.channel_step(did, up)
+                elif action == "key":
+                    v = str(body.get("value", ""))
+                    if v not in TV_KEYS:
+                        self._send_json(400, {"error": f"unsupported key: {v}"})
+                        return
+                    run = lambda: _client.send_key(did, v)
+                elif action in ("picture_mode", "sound_mode"):
+                    v = str(body.get("value", ""))
+                    which = action.split("_")[0]
+                    patch = {action: v}
+                    run = lambda: _client.set_av_mode(did, which, v)
                 elif action == "machine":
                     v = str(body.get("value", ""))
                     if v not in ("run", "pause", "stop"):
@@ -803,8 +858,12 @@ class Handler(BaseHTTPRequestHandler):
                 # Sliders send a burst of values; one row per drag is enough.
                 _events.add("info", "command", f"{label} · OK",
                             device_id=did, device_name=dname,
+                            # Remote keys come in bursts too (four RIGHTs to
+                            # reach an app); one folded row says "remote used".
                             key=f"cmd:{action}" if action in ("volume", "brightness",
-                                                             "setpoint") else "",
+                                                             "setpoint", "key",
+                                                             "channel_up",
+                                                             "channel_down") else "",
                             window=30)
                 # Reconcile with the real cloud state once SmartThings has caught
                 # up, so a silently-failed command self-corrects.
